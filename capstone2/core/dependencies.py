@@ -8,7 +8,7 @@ config = get_config()
 # 비밀 키 및 알고리즘 설정
 SECRET_KEY = config.jwt_secret_key
 ALGORITHM = "HS256"
-EXPIRE_MINUTES = config.jwt_expire_minutes
+EXPIRE_MINUTES = config.jwt_token_expire_minutes
 
 def create_jwt(data: dict):
     # 만료 시간 설정
