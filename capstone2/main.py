@@ -3,9 +3,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from User.user_router import router as user_router
+from Vision.vision_router import router as vision_router
 
 routers = []
 routers.append(user_router)
+routers.append(vision_router)
 
 app = FastAPI(
     title="Travel Itinerary Service",
