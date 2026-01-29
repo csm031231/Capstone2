@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     jwt_token_expire_minutes: int = 60 * 24  
 
     openai_api_key: str = ""
-    kakao_map_api_key: str = ""
+    kakao_rest_api_key: str
     tour_api_key: str = ""
 
     model_config = SettingsConfigDict(
