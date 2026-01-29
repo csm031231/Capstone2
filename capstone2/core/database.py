@@ -1,5 +1,5 @@
 from typing import Optional
-import ssl  
+import ssl
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -17,21 +17,21 @@ def init_db(config) -> None:
     postgres_table = config.postgresql_table
     postgres_user = config.postgresql_user
     postgres_password = config.postgresql_password
-    
+
     db_url = (
         "postgresql+asyncpg://"
         + f"{postgres_user}:{postgres_password}"
         + f"@{postgres_endpoint}:{postgres_port}/{postgres_table}"
     )
-    
+
     try:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
-        
+
         db_engine = create_async_engine(
             db_url,
-            connect_args={"ssl": ssl_context}  
+            connect_args={"ssl": ssl_context}
         )
         
         DBSessionLocal = sessionmaker(
