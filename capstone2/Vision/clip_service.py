@@ -3,11 +3,15 @@ CLIP 모델 서비스
 - 이미지를 벡터로 변환
 - Hugging Face transformers 사용
 """
+import threading
+import logging
 import torch
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 from typing import List, Optional
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class CLIPService:
@@ -15,19 +19,24 @@ class CLIPService:
     _model = None
     _processor = None
     _device = None
+    _lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
         if CLIPService._model is None:
-            self._load_model()
+            with CLIPService._lock:
+                if CLIPService._model is None:
+                    self._load_model()
 
     def _load_model(self):
         """CLIP 모델 로드 (싱글톤)"""
-        print("CLIP 모델 로딩 중...")
+        logger.info("CLIP 모델 로딩 중...")
 
         # GPU 사용 가능하면 GPU, 아니면 CPU
         CLIPService._device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,7 +50,7 @@ class CLIPService:
         # 추론 모드로 설정 (메모리 절약)
         CLIPService._model.eval()
 
-        print(f"CLIP 모델 로드 완료 (Device: {CLIPService._device})")
+        logger.info(f"CLIP 모델 로드 완료 (Device: {CLIPService._device})")
 
     def get_image_embedding(self, image: Image.Image) -> np.ndarray:
         """
@@ -108,11 +117,14 @@ class CLIPService:
 
 # 전역 인스턴스 (Lazy Loading)
 _clip_service: Optional[CLIPService] = None
+_clip_lock = threading.Lock()
 
 
 def get_clip_service() -> CLIPService:
     """CLIP 서비스 인스턴스 반환"""
     global _clip_service
     if _clip_service is None:
-        _clip_service = CLIPService()
+        with _clip_lock:
+            if _clip_service is None:
+                _clip_service = CLIPService()
     return _clip_service

@@ -79,9 +79,15 @@ class FAISSIndex:
         """
         # 벡터 정규화 확인
         vector = vector.astype(np.float32).reshape(1, -1)
+
+        # NaN/Inf 검사
+        if np.any(np.isnan(vector)) or np.any(np.isinf(vector)):
+            raise ValueError("벡터에 NaN 또는 Inf 값이 포함되어 있습니다")
+
         norm = np.linalg.norm(vector)
-        if norm > 0:
-            vector = vector / norm
+        if norm == 0:
+            raise ValueError("영벡터(zero vector)는 인덱스에 추가할 수 없습니다")
+        vector = vector / norm
 
         # FAISS에 추가
         self.index.add(vector)
@@ -121,9 +127,14 @@ class FAISSIndex:
 
         # 벡터 정규화
         query_vector = query_vector.astype(np.float32).reshape(1, -1)
+
+        if np.any(np.isnan(query_vector)) or np.any(np.isinf(query_vector)):
+            return []
+
         norm = np.linalg.norm(query_vector)
-        if norm > 0:
-            query_vector = query_vector / norm
+        if norm == 0:
+            return []
+        query_vector = query_vector / norm
 
         # 검색 (Inner Product = 코사인 유사도)
         scores, indices = self.index.search(query_vector, min(top_k * 2, self.index.ntotal))

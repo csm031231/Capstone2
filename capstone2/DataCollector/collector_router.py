@@ -1,13 +1,17 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from core.database import provide_session
-from core.models import User
+from core.models import User, Place
 from User.user_router import get_current_user
 from DataCollector.collector_service import get_collector_service
 from DataCollector.tour_api_service import get_tour_api_service
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -146,6 +150,109 @@ async def collect_bulk(
         "success": True,
         "total_collected": total_collected,
         "by_area": results
+    }
+
+
+# ==================== FAISS 인덱싱 ====================
+
+@router.post("/index/build")
+async def build_faiss_index(
+    region: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    FAISS 벡터 인덱스 구축
+
+    DB의 Place 중 image_url이 있는 장소의 이미지를 CLIP으로 벡터화하여
+    FAISS 인덱스에 추가합니다. Vision 추천 기능에 필요합니다.
+
+    - region: 특정 지역만 인덱싱 (없으면 전체)
+    - 이미 인덱싱된 장소는 건너뜁니다
+    """
+    import httpx
+    from PIL import Image
+    from io import BytesIO
+    from Vision.clip_service import get_clip_service
+    from Vision.faiss_index import get_faiss_index, PlaceVector
+
+    clip = get_clip_service()
+    faiss_index = get_faiss_index()
+
+    # 이미 인덱싱된 place_id 수집
+    indexed_ids = {m["place_id"] for m in faiss_index.metadata}
+
+    # DB에서 이미지 있는 장소 조회
+    query = select(Place).where(Place.image_url.isnot(None))
+    if region:
+        query = query.where(Place.address.contains(region))
+
+    result = await db.execute(query)
+    places = result.scalars().all()
+
+    indexed = 0
+    skipped = 0
+    errors = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for place in places:
+            if place.id in indexed_ids:
+                skipped += 1
+                continue
+
+            try:
+                # 이미지 다운로드
+                resp = await client.get(place.image_url)
+                resp.raise_for_status()
+                img = Image.open(BytesIO(resp.content)).convert("RGB")
+
+                # CLIP 벡터 추출
+                vector = clip.get_image_embedding(img)
+
+                # FAISS에 추가
+                place_vector = PlaceVector(
+                    place_id=place.id,
+                    name=place.name,
+                    image_url=place.image_url,
+                    tags=place.tags or [],
+                    category=place.category or "기타",
+                    address=place.address or "",
+                    latitude=place.latitude,
+                    longitude=place.longitude
+                )
+                faiss_index.add_place(place_vector, vector)
+                indexed += 1
+
+            except Exception as e:
+                errors.append(f"{place.name}: {str(e)[:50]}")
+                continue
+
+    # 인덱스 저장
+    if indexed > 0:
+        faiss_index.save()
+
+    return {
+        "success": True,
+        "indexed": indexed,
+        "skipped": skipped,
+        "errors": len(errors),
+        "error_details": errors[:10],
+        "total_in_index": faiss_index.get_total_count(),
+        "message": f"{indexed}개 장소를 인덱싱했습니다."
+    }
+
+
+@router.get("/index/stats")
+async def get_index_stats():
+    """FAISS 인덱스 현황 조회"""
+    from Vision.faiss_index import get_faiss_index
+
+    faiss_index = get_faiss_index()
+
+    return {
+        "total_vectors": faiss_index.get_total_count(),
+        "dimension": faiss_index.dimension,
+        "index_path": faiss_index.index_path
     }
 
 

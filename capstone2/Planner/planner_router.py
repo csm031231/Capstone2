@@ -6,8 +6,6 @@ from core.models import User
 from User.user_router import get_current_user
 
 from Recommend.preference_service import get_user_preference
-from Recommend.dto import PreferenceSurvey, PreferenceResponse
-from Recommend.preference_service import save_user_preference
 
 from Planner.dto import (
     GenerateRequest, GenerateResponse,
@@ -26,58 +24,7 @@ router = APIRouter(
 )
 
 
-# ==================== 선호도 API ====================
-
-@router.post("/preference", response_model=PreferenceResponse)
-async def save_preference(
-    survey: PreferenceSurvey,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(provide_session)
-):
-    """
-    선호도 설문 저장
-
-    카테고리 점수(1-5)를 가중치(0-1)로 변환하여 저장합니다.
-    이후 AI 일정 생성 시 자동으로 반영됩니다.
-    """
-    preference = await save_user_preference(db, current_user.id, survey)
-
-    return PreferenceResponse(
-        id=preference.id,
-        user_id=preference.user_id,
-        category_weights=preference.category_weights,
-        preferred_themes=preference.preferred_themes,
-        travel_pace=preference.travel_pace,
-        budget_level=preference.budget_level,
-        preferred_start_time=preference.preferred_start_time,
-        preferred_end_time=preference.preferred_end_time
-    )
-
-
-@router.get("/preference", response_model=PreferenceResponse)
-async def get_preference(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(provide_session)
-):
-    """내 선호도 조회"""
-    preference = await get_user_preference(db, current_user.id)
-
-    if not preference:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="선호도 설정이 없습니다. 먼저 선호도를 설정해주세요."
-        )
-
-    return PreferenceResponse(
-        id=preference.id,
-        user_id=preference.user_id,
-        category_weights=preference.category_weights,
-        preferred_themes=preference.preferred_themes,
-        travel_pace=preference.travel_pace,
-        budget_level=preference.budget_level,
-        preferred_start_time=preference.preferred_start_time,
-        preferred_end_time=preference.preferred_end_time
-    )
+# 선호도 API는 /recommend/preference로 통일되었습니다.
 
 
 # ==================== AI 일정 생성 API ====================

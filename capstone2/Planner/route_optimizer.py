@@ -23,7 +23,7 @@ class RouteOptimizer:
         Args:
             places_by_day: {day_number: [place_dict, ...]}
             start_location: {'lat': float, 'lng': float}
-            end_location: {'lat': float, 'lng': float}
+            end_location: {'lat': float, 'lng': float} (숙소 복귀 등)
 
         Returns:
             최적화된 places_by_day
@@ -32,8 +32,10 @@ class RouteOptimizer:
 
         for day, places in places_by_day.items():
             if len(places) <= 2:
-                # 2개 이하면 최적화 불필요
+                # 2개 이하면 최적화 불필요하지만 이동 시간은 추가
                 optimized[day] = self._add_travel_times(places)
+                for idx, place in enumerate(optimized[day]):
+                    place['order_index'] = idx + 1
                 continue
 
             # 시작점 설정
@@ -43,12 +45,21 @@ class RouteOptimizer:
                 # 첫 번째 장소를 시작점으로
                 start = (places[0]['latitude'], places[0]['longitude'])
 
+            # 종료점 설정 (숙소 복귀)
+            end = None
+            if end_location:
+                end = (end_location['lat'], end_location['lng'])
+
             # 거리 행렬 계산
             distance_matrix = self._build_distance_matrix(places)
 
             # 최적화 실행
             route = self._nearest_neighbor(distance_matrix, start, places)
             route = self._two_opt(route, distance_matrix)
+
+            # end_location이 있으면 마지막 장소가 end에 가장 가까운지 확인
+            if end:
+                route = self._optimize_for_end_location(route, places, end)
 
             # 결과 재정렬
             reordered = [places[i] for i in route]
@@ -63,6 +74,75 @@ class RouteOptimizer:
             optimized[day] = reordered
 
         return optimized
+
+    def _optimize_for_end_location(
+        self,
+        route: List[int],
+        places: List[dict],
+        end: Tuple[float, float]
+    ) -> List[int]:
+        """종료 위치(숙소 등)에 가장 가까운 장소가 마지막이 되도록 조정"""
+        if len(route) < 2:
+            return route
+
+        # 마지막 장소의 종료점까지 거리
+        last_idx = route[-1]
+        last_dist = self._haversine(
+            places[last_idx]['latitude'], places[last_idx]['longitude'],
+            end[0], end[1]
+        )
+
+        # 더 가까운 장소가 있는지 확인 (마지막 3개만)
+        best_route = route[:]
+        best_dist = last_dist
+
+        for i in range(max(0, len(route) - 3), len(route) - 1):
+            candidate_idx = route[i]
+            dist = self._haversine(
+                places[candidate_idx]['latitude'], places[candidate_idx]['longitude'],
+                end[0], end[1]
+            )
+            if dist < best_dist:
+                # i를 마지막으로 이동
+                new_route = route[:i] + route[i+1:] + [route[i]]
+                # 총 거리 비교 (end 포함)
+                new_total = self._route_distance_with_endpoints(new_route, places, None, end)
+                old_total = self._route_distance_with_endpoints(route, places, None, end)
+                if new_total < old_total:
+                    best_route = new_route
+                    best_dist = dist
+
+        return best_route
+
+    def _route_distance_with_endpoints(
+        self,
+        route: List[int],
+        places: List[dict],
+        start: Optional[Tuple[float, float]],
+        end: Optional[Tuple[float, float]]
+    ) -> float:
+        """시작/종료점 포함 경로 총 거리"""
+        total = 0.0
+
+        if start and route:
+            total += self._haversine(
+                start[0], start[1],
+                places[route[0]]['latitude'], places[route[0]]['longitude']
+            )
+
+        for i in range(len(route) - 1):
+            total += self._haversine(
+                places[route[i]]['latitude'], places[route[i]]['longitude'],
+                places[route[i+1]]['latitude'], places[route[i+1]]['longitude']
+            )
+
+        if end and route:
+            total += self._haversine(
+                places[route[-1]]['latitude'], places[route[-1]]['longitude'],
+                end[0], end[1]
+            )
+
+        return total
 
     def calculate_optimization_score(
         self,
@@ -93,7 +173,7 @@ class RouteOptimizer:
             return 1.0
 
         # 평균 거리 기반 점수 (5km 이하 = 1.0, 20km 이상 = 0.0)
-        avg_distance = total_distance / (total_places - 1) if total_places > 1 else 0
+        avg_distance = total_distance / (total_places - 1)
 
         if avg_distance <= 5:
             return 1.0
@@ -186,6 +266,7 @@ class RouteOptimizer:
         """2-opt 로컬 서치로 경로 개선"""
         improved = True
         best_route = route[:]
+        best_distance = self._route_distance(best_route, matrix)
 
         while improved:
             improved = False
@@ -198,8 +279,10 @@ class RouteOptimizer:
                         best_route[j+1:]
                     )
 
-                    if self._route_distance(new_route, matrix) < self._route_distance(best_route, matrix):
+                    new_distance = self._route_distance(new_route, matrix)
+                    if new_distance < best_distance:
                         best_route = new_route
+                        best_distance = new_distance
                         improved = True
 
         return best_route

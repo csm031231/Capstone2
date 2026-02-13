@@ -1,10 +1,12 @@
 import base64
 import json
+import logging
 from openai import OpenAI
 from typing import Optional
 from core.config import get_config
 from Vision.dto import VisionAnalysisResult, LocationInfo, SceneInfo, VisionResponse, ExifInfo, LocationCandidate
 
+logger = logging.getLogger(__name__)
 
 config = get_config()
 client = OpenAI(api_key=config.openai_api_key)
@@ -105,6 +107,9 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
                 confidence=float(c2.get("confidence", 0))
             )
             confidence_gap = top1.confidence - top2.confidence if top1 else 0.0
+        elif top1:
+            # 후보 1개만 있으면 경쟁자 없음 → gap을 높게 설정
+            confidence_gap = top1.confidence
 
         # 메인 결과는 top1 기준
         return VisionAnalysisResult(
@@ -119,8 +124,14 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
             confidence_gap=confidence_gap
         )
 
+    except json.JSONDecodeError as e:
+        logger.error(f"GPT Vision 응답 JSON 파싱 실패: {e}")
+        return VisionAnalysisResult(
+            confidence=0.0,
+            reason=f"분석 응답 파싱 실패: {str(e)}"
+        )
     except Exception as e:
-        print(f"GPT Vision 분석 오류: {e}")
+        logger.error(f"GPT Vision 분석 오류: {e}")
         return VisionAnalysisResult(
             confidence=0.0,
             reason=f"분석 실패: {str(e)}"
@@ -143,13 +154,15 @@ def determine_type(analysis: VisionAnalysisResult, exif: Optional[ExifInfo] = No
         confidence = min(confidence + 0.1, 1.0)
 
     # Type A 조건 (명확한 장소)
-    # 1. 랜드마크 존재 + 격차가 0.3 이상 (압도적 1위)
-    # 2. 또는 confidence가 매우 높음 (0.85 이상)
     if analysis.landmark:
+        # 랜드마크가 있으면 기본적으로 Type A 유력
         if gap >= 0.3:
             return "A"  # 1위가 압도적
         if confidence >= 0.85:
             return "A"  # 매우 높은 확신
+        # 랜드마크 + 중간 이상 확신이면 Type A (기존 로직의 빈틈 수정)
+        if confidence >= 0.6 and gap >= 0.15:
+            return "A"
 
     # 랜드마크 없어도 confidence + gap 조합으로 Type A 가능
     if confidence >= 0.75 and gap >= 0.25:

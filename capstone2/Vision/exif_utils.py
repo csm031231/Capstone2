@@ -1,8 +1,11 @@
+import logging
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 from typing import Optional, Tuple
 from datetime import datetime
 from Vision.dto import ExifInfo
+
+logger = logging.getLogger(__name__)
 
 
 def get_exif_data(image: Image.Image) -> dict:
@@ -15,8 +18,8 @@ def get_exif_data(image: Image.Image) -> dict:
             for tag_id, value in exif.items():
                 tag = TAGS.get(tag_id, tag_id)
                 exif_data[tag] = value
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"EXIF 데이터 추출 실패: {e}")
 
     return exif_data
 
@@ -49,8 +52,8 @@ def get_gps_info(exif_data: dict) -> Optional[Tuple[float, float]]:
                 lon_val = -lon_val
 
             return (lat_val, lon_val)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"GPS 좌표 파싱 실패: {e}")
 
     return None
 
@@ -70,8 +73,8 @@ def get_datetime(exif_data: dict) -> Optional[datetime]:
     if datetime_str:
         try:
             return datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"촬영 시간 파싱 실패: {e}")
 
     return None
 

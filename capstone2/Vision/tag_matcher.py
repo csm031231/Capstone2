@@ -4,9 +4,6 @@
 - CLIP 유사도가 낮을 때 사용
 """
 from typing import List, Dict, Tuple, Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
-from core.models import Place
 
 
 # 태그 카테고리 정의 (동의어 매핑)
@@ -100,51 +97,6 @@ def calculate_tag_score(place_tags: List[str], query_tags: List[str]) -> float:
     score = jaccard * 0.4 + coverage * 0.6
 
     return min(score, 1.0)
-
-
-async def search_by_tags(
-    db: AsyncSession,
-    tags: List[str],
-    top_k: int = 10,
-    min_score: float = 0.2
-) -> List[Tuple[Place, float]]:
-    """
-    태그 기반 여행지 검색 (DB)
-
-    Args:
-        db: DB 세션
-        tags: 검색할 태그 리스트
-        top_k: 최대 반환 개수
-        min_score: 최소 점수
-
-    Returns:
-        [(Place 객체, 점수), ...] 리스트
-    """
-    if not tags:
-        return []
-
-    # 정규화된 태그
-    normalized_tags = normalize_tags(tags)
-
-    # Place 테이블에서 태그가 있는 것들 조회
-    result = await db.execute(
-        select(Place).where(Place.tags.isnot(None))
-    )
-    places = result.scalars().all()
-
-    # 점수 계산 및 정렬
-    scored_places = []
-    for place in places:
-        place_tags = place.tags if isinstance(place.tags, list) else []
-        score = calculate_tag_score(place_tags, normalized_tags)
-
-        if score >= min_score:
-            scored_places.append((place, score))
-
-    # 점수 내림차순 정렬
-    scored_places.sort(key=lambda x: x[1], reverse=True)
-
-    return scored_places[:top_k]
 
 
 def match_tags_with_places(
