@@ -15,6 +15,7 @@ class TourAPIService:
     엔드포인트:
     - /areaBasedList2: 지역기반 관광정보조회
     - /searchKeyword2: 키워드 검색 조회
+    - /searchFestival2: 축제/행사 검색 조회 ★ 추가
     - /detailCommon2: 공통정보조회
     - /detailIntro2: 소개정보조회 (운영시간, 휴무일 등)
     - /detailInfo2: 반복정보조회
@@ -123,7 +124,7 @@ class TourAPIService:
             items = [items]
 
         return items or []
-    
+
     async def search_festivals(
         self,
         area_code: Optional[int] = None,
@@ -133,7 +134,7 @@ class TourAPIService:
         num_of_rows: int = 50
     ) -> List[Dict[str, Any]]:
         """
-        축제/행사 검색
+        축제/행사 검색 ★ 신규 추가
 
         Args:
             area_code: 지역 코드 (선택, 없으면 전국)
@@ -153,6 +154,7 @@ class TourAPIService:
             "MobileOS": "ETC",
             "MobileApp": "TravelApp",
             "_type": "json",
+            "listYN": "Y",
             "arrange": "A",  # 제목순 정렬
         }
 
@@ -165,40 +167,18 @@ class TourAPIService:
         if event_end_date:
             params["eventEndDate"] = event_end_date
 
-        print(f"DEBUG TourAPI: 요청 URL = {endpoint}")
-        print(f"DEBUG TourAPI: 파라미터 = {params}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(endpoint, params=params)
+            response.raise_for_status()
+            data = response.json()
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(endpoint, params=params)
-                
-                print(f"DEBUG TourAPI: 응답 상태 = {response.status_code}")
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                # 응답 구조 확인
-                header = data.get("response", {}).get("header", {})
-                result_code = header.get("resultCode")
-                result_msg = header.get("resultMsg")
-                
-                print(f"DEBUG TourAPI: 결과 코드 = {result_code}, 메시지 = {result_msg}")
+        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
 
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        # 단일 항목인 경우 리스트로 변환
+        if isinstance(items, dict):
+            items = [items]
 
-            # 단일 항목인 경우 리스트로 변환
-            if isinstance(items, dict):
-                items = [items]
-
-            print(f"DEBUG TourAPI: 파싱된 아이템 수 = {len(items) if items else 0}")
-
-            return items or []
-        
-        except Exception as e:
-            print(f"ERROR TourAPI: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
+        return items or []
 
     async def get_detail_common(self, content_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -260,6 +240,14 @@ class TourAPIService:
                 - usetime: 이용시간
                 - restdate: 휴무일
                 - usefee: 이용요금
+                
+            축제공연행사(15): ★ 추가
+                - eventstartdate: 행사 시작일
+                - eventenddate: 행사 종료일
+                - eventplace: 행사 장소
+                - playtime: 공연 시간
+                - program: 행사 프로그램
+                - usetimefestival: 이용 요금
         """
         endpoint = f"{self.BASE_URL}/detailIntro2"
         params = {
@@ -288,10 +276,14 @@ class TourAPIService:
     async def get_full_place_info(
         self,
         content_id: int,
-        content_type_id: int
+        content_type_id: int = 12
     ) -> Dict[str, Any]:
         """
         관광지 전체 정보 조회 (공통 + 소개)
+        
+        Args:
+            content_id: 콘텐츠 ID
+            content_type_id: 콘텐츠 타입 (기본값: 12 - 관광지)
         """
         common, intro = await asyncio.gather(
             self.get_detail_common(content_id),

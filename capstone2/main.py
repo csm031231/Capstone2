@@ -9,7 +9,8 @@ from core.database import init_db
 # 라우터 임포트
 from User.user_router import router as user_router
 from Vision.vision_router import router as vision_router
-from place.router import router as place_router 
+from Place.router import router as place_router 
+from Festival.router import router as festival_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +23,7 @@ routers = []
 routers.append(user_router)
 routers.append(vision_router)
 routers.append(place_router) 
+routers.append(festival_router)
 
 # FastAPI 앱 생성
 app = FastAPI(
