@@ -183,6 +183,14 @@ class DataCollectorService:
                 operating_hours=place_data.get("operating_hours"),
                 closed_days=place_data.get("closed_days"),
                 fee_info=place_data.get("fee_info"),
+                content_id=place_data.get("content_id"),
+                content_type_id=place_data.get("content_type_id"),
+                cat1=place_data.get("cat1"),
+                cat2=place_data.get("cat2"),
+                cat3=place_data.get("cat3"),
+                readcount=place_data.get("readcount"),
+                tel=place_data.get("tel"),
+                homepage=place_data.get("homepage"),
             )
 
             db.add(place)

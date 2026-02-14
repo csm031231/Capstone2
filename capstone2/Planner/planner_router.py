@@ -1,3 +1,4 @@
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +71,10 @@ async def generate_itinerary(
             detail=str(e)
         )
     except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"[PLANNER ERROR] 일정 생성 중 오류:")
+        traceback.print_exc()
+        print(f"{'='*60}\n")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"일정 생성 중 오류가 발생했습니다: {str(e)}"

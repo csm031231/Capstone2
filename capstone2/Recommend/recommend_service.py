@@ -146,10 +146,11 @@ class ConditionRecommender:
         """조건 부합도 계산"""
         score = 0.0
         weights = {
-            "theme": 0.4,
-            "category": 0.3,
+            "theme": 0.35,
+            "category": 0.25,
             "budget": 0.2,
-            "availability": 0.1
+            "availability": 0.1,
+            "popularity": 0.1,
         }
 
         # 1. 테마 매칭
@@ -179,6 +180,11 @@ class ConditionRecommender:
 
         # 4. 가용성 (휴무일 체크는 이미 필터링됨)
         score += weights["availability"]
+
+        # 5. 인기도 (readcount 기반)
+        if place.readcount:
+            popularity = min(place.readcount / 10000, 1.0)
+            score += popularity * weights["popularity"]
 
         return min(score, 1.0)
 

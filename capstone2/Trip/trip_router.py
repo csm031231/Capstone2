@@ -97,6 +97,8 @@ async def create_trip(
         )
 
     trip = await crud.create_trip(db, current_user.id, data)
+    # itineraries 관계를 eager load하기 위해 다시 조회
+    trip = await crud.get_trip_by_id(db, trip.id, current_user.id)
     return build_trip_detail_response(trip)
 
 

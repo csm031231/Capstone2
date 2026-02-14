@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # User가 정의한 core 모듈들 import
 from core.database import provide_session
@@ -20,7 +20,7 @@ router = APIRouter(
     tags=["users"]
 )
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="users/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="users/login/token")
 
 # --- 인증 의존성 함수 ---
 async def get_current_user(
@@ -64,7 +64,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(provide_ses
     # 사용자 생성
     return await create_user(db, user_data)
 
-# 2. 로그인
+# 2. 로그인 (JSON body)
 @router.post("/login", response_model=Token)
 async def login(user_data: UserLogin, db: AsyncSession = Depends(provide_session)):
     # 사용자 조회
@@ -74,16 +74,36 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(provide_session
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
-    
+
     # 비밀번호 검증 (core/dependencies.py 함수 사용)
     if not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
-    
+
     # 토큰 발급 (core/dependencies.py 함수 사용)
     # sub는 JWT 표준 subject claim (여기서는 user id)
+    access_token = create_jwt(data={"sub": str(user.id)})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# 2-1. 로그인 (Swagger docs용 - OAuth2 form)
+@router.post("/login/token", response_model=Token)
+async def login_for_docs(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(provide_session)):
+    # username 필드에 이메일을 입력
+    user = await get_user_by_email(db, form_data.username)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+        )
+
+    if not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+        )
+
     access_token = create_jwt(data={"sub": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
 

@@ -1,6 +1,7 @@
 import json
 import re
 import logging
+import asyncio
 from typing import List, Optional, Dict
 from datetime import time
 from openai import OpenAI
@@ -55,45 +56,58 @@ class PlannerService:
         total_days = (request.end_date - request.start_date).days + 1
 
         # 2단계: 후보 장소 수집
+        print("[PLANNER] 2단계: 후보 장소 수집 시작")
         candidates = await self._gather_candidates(
             db, request, user_preference, total_days
         )
 
         if not candidates:
             raise ValueError("조건에 맞는 여행지가 없습니다")
+        print(f"[PLANNER] 2단계 완료: {len(candidates)}개 후보 장소")
 
         # 3단계: GPT 일정 초안 생성
+        print("[PLANNER] 3단계: GPT 일정 생성 시작")
         draft = await self._generate_with_gpt(
             candidates, request, user_preference, total_days
         )
+        print(f"[PLANNER] 3단계 완료: {len(draft.get('days', []))}일 일정 생성")
 
         # 4단계: 장소 딕셔너리로 변환
+        print("[PLANNER] 4단계: 장소 매핑 시작")
         place_dict = {c['place_id']: c for c in candidates}
         places_by_day = self._build_places_by_day(draft, place_dict)
+        print(f"[PLANNER] 4단계 완료: {sum(len(v) for v in places_by_day.values())}개 장소 매핑")
 
         # 5단계: 동선 최적화
-        optimized = self.route_optimizer.optimize(
+        print("[PLANNER] 5단계: 동선 최적화 시작")
+        optimized = await self.route_optimizer.optimize(
             places_by_day,
             request.start_location,
             request.end_location
         )
+        print("[PLANNER] 5단계 완료")
 
         # 6단계: 시간 제약 적용
+        print("[PLANNER] 6단계: 시간 제약 적용 시작")
         constrained = self.time_service.apply_constraints(
             optimized,
             user_preference,
             request.start_date
         )
+        print("[PLANNER] 6단계 완료")
 
         # 경고 메시지 추출
         warnings = constrained.pop('_warnings', [])
 
         # 7단계: DB 저장
+        print("[PLANNER] 7단계: DB 저장 시작")
         trip = await self._save_trip(
             db, user_id, request, constrained, user_preference
         )
+        print(f"[PLANNER] 7단계 완료: trip_id={trip.id}")
 
         # 8단계: 응답 생성
+        print("[PLANNER] 8단계: 응답 생성")
         return self._build_response(
             trip, constrained, draft, request, total_days, warnings
         )
@@ -125,7 +139,17 @@ class PlannerService:
         # 추천 실행
         places = await self.recommender.recommend(db, condition, preference)
 
-        # 딕셔너리로 변환
+        # 딕셔너리로 변환 (readcount 포함을 위해 DB에서 Place 재조회)
+        place_ids = [p.place_id for p in places]
+        db_places = {}
+        if place_ids:
+            from sqlalchemy import select as sa_select
+            result = await db.execute(
+                sa_select(Place).where(Place.id.in_(place_ids))
+            )
+            for dp in result.scalars().all():
+                db_places[dp.id] = dp
+
         candidates = [
             {
                 "place_id": p.place_id,
@@ -139,6 +163,7 @@ class PlannerService:
                 "operating_hours": p.operating_hours,
                 "closed_days": p.closed_days,
                 "description": p.description,
+                "readcount": db_places[p.place_id].readcount if p.place_id in db_places else None,
                 "score": p.final_score
             }
             for p in places
@@ -234,18 +259,22 @@ class PlannerService:
   }}
 }}"""
 
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "여행 일정 전문가입니다. JSON 형식으로만 응답합니다."
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=3000,
-            temperature=0.7
-        )
+        # 동기 OpenAI 호출을 별도 스레드에서 실행 (async 이벤트 루프 블로킹 방지)
+        def _call_gpt():
+            return self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "여행 일정 전문가입니다. JSON 형식으로만 응답합니다."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=3000,
+                temperature=0.7
+            )
+
+        response = await asyncio.to_thread(_call_gpt)
 
         result_text = response.choices[0].message.content
         return self._parse_gpt_response(result_text)
@@ -262,12 +291,17 @@ class PlannerService:
 
         lines = []
         for c in selected:
-            tags_str = ', '.join(c.get('tags', [])[:3]) if c.get('tags') else ''
+            tags_str = ', '.join(c.get('tags', [])[:5]) if c.get('tags') else ''
             must = " [필수]" if c.get('must_visit') else ""
+            popularity = f", 인기도: {c.get('readcount', 0)}" if c.get('readcount') else ""
+            desc_short = ""
+            if c.get('description'):
+                desc_short = f", 설명: {c['description'][:40]}..."
             lines.append(
                 f"- ID: {c['place_id']}, 이름: {c['name']}, "
                 f"카테고리: {c.get('category', '기타')}, "
-                f"태그: [{tags_str}], 점수: {c.get('score', 0):.2f}{must}"
+                f"태그: [{tags_str}], 점수: {c.get('score', 0):.2f}"
+                f"{popularity}{desc_short}{must}"
             )
         return '\n'.join(lines)
 

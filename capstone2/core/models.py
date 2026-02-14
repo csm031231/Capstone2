@@ -42,6 +42,16 @@ class Place(Base):
     closed_days = Column(String, nullable=True)        # "매주 월요일"
     fee_info = Column(String, nullable=True)           # "성인 5000원"
 
+    # Tour API 추가 정보
+    content_id = Column(Integer, nullable=True, index=True)   # Tour API content ID
+    content_type_id = Column(Integer, nullable=True)           # 콘텐츠 타입 코드
+    cat1 = Column(String, nullable=True)                       # 대분류 코드
+    cat2 = Column(String, nullable=True)                       # 중분류 코드
+    cat3 = Column(String, nullable=True)                       # 소분류 코드
+    readcount = Column(Integer, nullable=True)                 # 조회수 (인기도)
+    tel = Column(String, nullable=True)                        # 전화번호
+    homepage = Column(String, nullable=True)                   # 홈페이지 URL
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -1,5 +1,8 @@
 import math
+import asyncio
 from typing import List, Dict, Optional, Tuple
+
+from services.kakao_service import get_route_info
 
 
 class RouteOptimizer:
@@ -9,9 +12,10 @@ class RouteOptimizer:
     알고리즘:
     1. Greedy Nearest Neighbor (초기 경로)
     2. 2-opt Local Search (개선)
+    3. 카카오 경로 API로 실제 이동시간 계산
     """
 
-    def optimize(
+    async def optimize(
         self,
         places_by_day: Dict[int, List[dict]],
         start_location: Optional[Dict[str, float]] = None,
@@ -33,24 +37,28 @@ class RouteOptimizer:
         for day, places in places_by_day.items():
             if len(places) <= 2:
                 # 2개 이하면 최적화 불필요하지만 이동 시간은 추가
-                optimized[day] = self._add_travel_times(places)
+                optimized[day] = await self._add_travel_times(places)
                 for idx, place in enumerate(optimized[day]):
                     place['order_index'] = idx + 1
                 continue
 
             # 시작점 설정
-            if start_location:
-                start = (start_location['lat'], start_location['lng'])
+            if start_location and (start_location.get('lat') or start_location.get('latitude')):
+                lat = start_location.get('lat') or start_location.get('latitude')
+                lng = start_location.get('lng') or start_location.get('longitude')
+                start = (lat, lng)
             else:
                 # 첫 번째 장소를 시작점으로
                 start = (places[0]['latitude'], places[0]['longitude'])
 
             # 종료점 설정 (숙소 복귀)
             end = None
-            if end_location:
-                end = (end_location['lat'], end_location['lng'])
+            if end_location and (end_location.get('lat') or end_location.get('latitude')):
+                lat = end_location.get('lat') or end_location.get('latitude')
+                lng = end_location.get('lng') or end_location.get('longitude')
+                end = (lat, lng)
 
-            # 거리 행렬 계산
+            # 거리 행렬 계산 (TSP는 Haversine으로 빠르게)
             distance_matrix = self._build_distance_matrix(places)
 
             # 최적화 실행
@@ -64,8 +72,8 @@ class RouteOptimizer:
             # 결과 재정렬
             reordered = [places[i] for i in route]
 
-            # 이동 시간 추가
-            reordered = self._add_travel_times(reordered)
+            # 카카오 경로 API로 실제 이동 시간 계산
+            reordered = await self._add_travel_times(reordered)
 
             # order_index 재설정
             for idx, place in enumerate(reordered):
@@ -298,32 +306,51 @@ class RouteOptimizer:
             total += matrix[route[i]][route[i + 1]]
         return total
 
-    def _add_travel_times(self, places: List[dict]) -> List[dict]:
-        """이동 시간 추가"""
+    async def _add_travel_times(self, places: List[dict]) -> List[dict]:
+        """카카오 경로 API로 실제 이동 시간 계산 (실패 시 Haversine 폴백)"""
         for i, place in enumerate(places):
             if i == 0:
                 place['travel_time_from_prev'] = None
                 place['transport_mode'] = None
             else:
                 prev = places[i - 1]
-                dist = self._haversine(
-                    prev['latitude'], prev['longitude'],
-                    place['latitude'], place['longitude']
+                prev_lng = prev['longitude']
+                prev_lat = prev['latitude']
+                curr_lng = place['longitude']
+                curr_lat = place['latitude']
+
+                # 카카오 경로 API 호출 (경도, 위도 순서)
+                route_info = await get_route_info(
+                    prev_lng, prev_lat, curr_lng, curr_lat
                 )
 
-                # 이동 시간 추정
-                if dist < 1:
-                    # 1km 미만: 도보 (5km/h)
-                    travel_time = int(dist / 5 * 60)
-                    transport_mode = "walk"
-                elif dist < 3:
-                    # 1-3km: 도보 또는 대중교통
-                    travel_time = int(dist / 4 * 60)  # 혼합
-                    transport_mode = "walk"
+                duration = route_info.get("duration", 0)  # 초 단위
+                distance = route_info.get("distance", 0)  # 미터 단위
+
+                if duration > 0:
+                    # 카카오 API 성공: 실제 도로 기반 시간
+                    travel_time = max(int(duration / 60), 1)  # 초 → 분
+                    dist_km = distance / 1000
+
+                    if dist_km < 1:
+                        transport_mode = "walk"
+                    elif dist_km < 3:
+                        transport_mode = "walk"
+                    else:
+                        transport_mode = "car"
                 else:
-                    # 3km 이상: 차량 (30km/h + 대기시간)
-                    travel_time = int(dist / 30 * 60) + 10
-                    transport_mode = "car"
+                    # 카카오 API 실패: Haversine 폴백
+                    dist_km = self._haversine(prev_lat, prev_lng, curr_lat, curr_lng)
+
+                    if dist_km < 1:
+                        travel_time = int(dist_km / 5 * 60)
+                        transport_mode = "walk"
+                    elif dist_km < 3:
+                        travel_time = int(dist_km / 4 * 60)
+                        transport_mode = "walk"
+                    else:
+                        travel_time = int(dist_km / 30 * 60) + 10
+                        transport_mode = "car"
 
                 place['travel_time_from_prev'] = max(travel_time, 5)  # 최소 5분
                 place['transport_mode'] = transport_mode
