@@ -43,7 +43,9 @@ class Place(Base):
     fee_info = Column(String, nullable=True)           # "성인 5000원"
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
+    is_festival = Column(Boolean, default=False)
+    event_start_date = Column(String, nullable=True) # YYYYMMDD
+    event_end_date = Column(String, nullable=True)   # YYYYMMDD
 
 # 3. Photo Analysis Domain (사진 분석 & 로그)
 class AnalysisLog(Base):
