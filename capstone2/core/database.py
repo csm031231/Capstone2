@@ -1,5 +1,5 @@
 from typing import Optional
-# import ssl  <-- 로컬 테스트 시 보통 불필요하여 주석 처리
+import ssl  # 주석 해제
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -7,44 +7,48 @@ from sqlalchemy.orm import sessionmaker
 
 Base = declarative_base()
 
-# 전역 변수 초기화
 DBSessionLocal: Optional[sessionmaker] = None
 db_engine: Optional[Engine] = None
 
 def init_db(config) -> None:
     global DBSessionLocal, db_engine
     
-    # config 객체에서 속성 가져오기
-    # (config.py의 Settings 클래스 속성명과 정확히 일치해야 합니다)
     postgres_endpoint = config.postgresql_endpoint
     postgres_port = config.postgresql_port
     postgres_table = config.postgresql_table
     postgres_user = config.postgresql_user
     postgres_password = config.postgresql_password
     
-    # DB 접속 URL 생성
     db_url = (
         "postgresql+asyncpg://"
         + f"{postgres_user}:{postgres_password}"
         + f"@{postgres_endpoint}:{postgres_port}/{postgres_table}"
     )
     
-    # --- [수정] SSL 설정 (로컬 환경에서는 보통 에러 원인이 되므로 주석 처리함) ---
-    # ssl_context = ssl.create_default_context()
-    # ssl_context.check_hostname = False
-    # ssl_context.verify_mode = ssl.CERT_NONE
-    # connect_args = {"ssl": ssl_context}
+    # AWS RDS SSL 설정 (프로덕션 환경)
+    # 로컬 개발 시에는 ssl=False 사용
+    import os
+    is_production = os.getenv("ENVIRONMENT", "development") == "production"
     
-    # 로컬 개발용 connect_args (비워둠)
-    connect_args = {} 
+    if is_production:
+        # SSL 인증서 검증 활성화
+        ssl_context = ssl.create_default_context()
+        # RDS 인증서 다운로드 필요 시:
+        # ssl_context.load_verify_locations('/path/to/rds-ca-2019-root.pem')
+        connect_args = {"ssl": ssl_context}
+    else:
+        # 로컬 개발: SSL 비활성화
+        connect_args = {"ssl": False}
     
-    print(f"Connecting to DB at {postgres_endpoint}...") # 연결 시도 로그
+    print(f"Connecting to DB at {postgres_endpoint}...")
 
-    # --- [수정] try-except 제거: 연결 실패 시 서버가 멈추고 에러를 뱉어야 함 ---
     db_engine = create_async_engine(
         db_url,
         connect_args=connect_args,
-        echo=True  # 터미널에 SQL 로그 출력 (디버깅용)
+        echo=True,  # 프로덕션에서는 False 권장
+        pool_pre_ping=True,  # 연결 체크
+        pool_size=5,  # 연결 풀 크기
+        max_overflow=10  # 최대 추가 연결
     )
     
     DBSessionLocal = sessionmaker(
@@ -57,9 +61,6 @@ def init_db(config) -> None:
 
 
 async def provide_session():
-    """
-    Dependency Injection을 위한 함수
-    """
     if DBSessionLocal is None:
         raise ImportError("DB 연결 실패: init_db가 호출되지 않았거나 연결 에러가 발생했습니다.")
     
