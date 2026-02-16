@@ -1,5 +1,6 @@
 import json
 import re
+import logging
 from typing import List, Optional, Dict, Any
 from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,8 @@ from core.config import get_config
 from core.models import ChatSession, Itinerary, Place, Trip
 from Trip import crud as trip_crud
 from Planner.dto import ChatRequest, ChatResponse, ChatMessage, ChangeItem
+
+logger = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -55,7 +58,10 @@ class ChatService:
 응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "감천문화마을"}], "response_message": "감천문화마을을 일정에서 제거했어요.", "needs_confirmation": false}
 
 사용자: "1일차 순서 바꿔줘, 해운대 먼저"
-응답: {"action_type": "reorder", "changes": [{"action": "reorder", "place_name": "해운대해수욕장", "day_number": 1, "new_order": 1}], "response_message": "해운대해수욕장을 1일차 첫 번째로 이동했어요.", "needs_confirmation": false}"""
+응답: {"action_type": "reorder", "changes": [{"action": "reorder", "place_name": "해운대해수욕장", "day_number": 1, "new_order": 1}], "response_message": "해운대해수욕장을 1일차 첫 번째로 이동했어요.", "needs_confirmation": false}
+
+사용자: "해운대 체류시간 2시간으로 바꿔줘"
+응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "해운대해수욕장", "stay_duration": 120}], "response_message": "해운대해수욕장 체류시간을 2시간으로 변경했어요.", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
@@ -129,7 +135,7 @@ class ChatService:
 
         if not result.get("needs_confirmation") and result.get("action_type") != "question":
             changes_made, updated_trip = await self._apply_changes(
-                db, trip, result.get("changes", []), available_places
+                db, user_id, trip, result.get("changes", []), available_places
             )
 
         # 8. 세션 업데이트
@@ -225,19 +231,14 @@ class ChatService:
         db: AsyncSession,
         trip: Trip
     ) -> List[Place]:
-        """추가 가능한 장소 조회"""
-        # 이미 일정에 있는 장소 제외
-        existing_ids = {it.place_id for it in trip.itineraries}
-
+        """추가 가능한 장소 조회 (기존 일정 장소도 포함 - reorder용)"""
         query = select(Place)
         if trip.region:
             query = query.where(Place.address.contains(trip.region))
 
-        query = query.limit(30)
+        query = query.limit(50)
         result = await db.execute(query)
-        places = result.scalars().all()
-
-        return [p for p in places if p.id not in existing_ids]
+        return result.scalars().all()
 
     def _format_available_places(self, places: List[Place]) -> str:
         """추가 가능한 장소 포맷팅"""
@@ -267,7 +268,7 @@ class ChatService:
             if match:
                 try:
                     return json.loads(match.group())
-                except:
+                except json.JSONDecodeError:
                     pass
 
             # 파싱 실패 시 기본 응답
@@ -278,155 +279,255 @@ class ChatService:
                 "needs_confirmation": False
             }
 
+    def _find_place_by_name(
+        self,
+        name: str,
+        places: List[Place]
+    ) -> Optional[Place]:
+        """장소명으로 정확한 매칭 (부분매칭 개선)"""
+        if not name:
+            return None
+
+        name_lower = name.lower().strip()
+
+        # 1. 정확 매칭
+        for p in places:
+            if p.name.lower() == name_lower:
+                return p
+
+        # 2. 포함 매칭 (이름 길이 차이가 가장 작은 것 선택)
+        best_match = None
+        best_len_diff = float('inf')
+        for p in places:
+            pname = p.name.lower()
+            if name_lower in pname or pname in name_lower:
+                diff = abs(len(pname) - len(name_lower))
+                if diff < best_len_diff:
+                    best_len_diff = diff
+                    best_match = p
+
+        return best_match
+
+    def _find_itinerary_by_name(
+        self,
+        name: str,
+        itineraries: List[Itinerary]
+    ) -> Optional[Itinerary]:
+        """일정에서 장소명으로 Itinerary 찾기"""
+        if not name:
+            return None
+
+        name_lower = name.lower().strip()
+
+        # 1. 정확 매칭
+        for it in itineraries:
+            if it.place.name.lower() == name_lower:
+                return it
+
+        # 2. 포함 매칭
+        best_match = None
+        best_len_diff = float('inf')
+        for it in itineraries:
+            pname = it.place.name.lower()
+            if name_lower in pname or pname in name_lower:
+                diff = abs(len(pname) - len(name_lower))
+                if diff < best_len_diff:
+                    best_len_diff = diff
+                    best_match = it
+
+        return best_match
+
     async def _apply_changes(
         self,
         db: AsyncSession,
+        user_id: int,
         trip: Trip,
         changes: List[dict],
         available_places: List[Place]
     ) -> tuple:
         """변경 사항 적용"""
         applied_changes = []
-        place_dict = {p.name.lower(): p for p in available_places}
         place_id_dict = {p.id: p for p in available_places}
 
         for change in changes:
             action = change.get("action")
 
-            if action == "add":
-                # 장소 추가
-                place = None
+            try:
+                if action == "add":
+                    result = await self._apply_add(db, trip, change, available_places, place_id_dict)
+                    if result:
+                        applied_changes.append(result)
 
-                # 이름으로 찾기
-                if change.get("place_name"):
-                    name_lower = change["place_name"].lower()
-                    for pname, p in place_dict.items():
-                        if name_lower in pname or pname in name_lower:
-                            place = p
-                            break
+                elif action == "remove":
+                    result = await self._apply_remove(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
 
-                # ID로 찾기
-                if not place and change.get("place_id"):
-                    place = place_id_dict.get(change["place_id"])
+                elif action == "replace":
+                    result = await self._apply_replace(db, trip, change, available_places, place_id_dict)
+                    if result:
+                        applied_changes.append(result)
 
-                # 카테고리로 찾기
-                if not place and change.get("category"):
-                    cat = change["category"]
-                    for p in available_places:
-                        if p.category and cat in p.category:
-                            place = p
-                            break
+                elif action == "reorder":
+                    result = await self._apply_reorder(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
 
-                if place:
-                    from Trip.dto import ItineraryCreate
-                    day = change.get("day_number", 1)
-                    order = change.get("order_index", 99)
+                elif action == "modify":
+                    result = await self._apply_modify(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
 
-                    await trip_crud.create_itinerary(
-                        db, trip.id,
-                        ItineraryCreate(
-                            place_id=place.id,
-                            day_number=day,
-                            order_index=order
-                        )
+            except Exception as e:
+                logger.error(f"변경 사항 적용 실패 ({action}): {e}")
+
+        # 업데이트된 여행 정보 조회 (user_id 포함하여 보안 유지)
+        updated = await trip_crud.get_trip_by_id(db, trip.id, user_id)
+
+        trip_dict = None
+        if updated:
+            trip_dict = {
+                "id": updated.id,
+                "title": updated.title,
+                "itineraries": [
+                    {
+                        "id": it.id,
+                        "place_name": it.place.name,
+                        "day_number": it.day_number,
+                        "order_index": it.order_index
+                    }
+                    for it in sorted(
+                        updated.itineraries,
+                        key=lambda x: (x.day_number, x.order_index)
                     )
-                    applied_changes.append({
-                        "action": "add",
-                        "place_name": place.name,
-                        "day_number": day
-                    })
-
-            elif action == "remove":
-                # 장소 제거
-                target_name = change.get("place_name", "").lower()
-                for it in trip.itineraries:
-                    if target_name in it.place.name.lower():
-                        await trip_crud.delete_itinerary(db, it.id)
-                        applied_changes.append({
-                            "action": "remove",
-                            "place_name": it.place.name
-                        })
-                        break
-
-            elif action == "replace":
-                # 장소 교체
-                old_name = change.get("old_place", "").lower()
-                new_name = change.get("new_place", "").lower()
-
-                # 기존 장소 찾기
-                old_it = None
-                for it in trip.itineraries:
-                    if old_name in it.place.name.lower():
-                        old_it = it
-                        break
-
-                # 새 장소 찾기
-                new_place = None
-                for pname, p in place_dict.items():
-                    if new_name in pname or pname in new_name:
-                        new_place = p
-                        break
-
-                if old_it and new_place:
-                    from Trip.dto import ItineraryUpdate
-                    await trip_crud.update_itinerary(
-                        db, old_it.id,
-                        ItineraryUpdate(place_id=new_place.id)
-                    )
-                    applied_changes.append({
-                        "action": "replace",
-                        "old_place": old_it.place.name,
-                        "new_place": new_place.name
-                    })
-
-            elif action == "reorder":
-                # 순서 변경
-                target_name = change.get("place_name", "").lower()
-                new_day = change.get("day_number")
-                new_order = change.get("new_order")
-
-                for it in trip.itineraries:
-                    if target_name in it.place.name.lower():
-                        from Trip.dto import ItineraryUpdate
-                        update_data = {}
-                        if new_day:
-                            update_data["day_number"] = new_day
-                        if new_order:
-                            update_data["order_index"] = new_order
-
-                        if update_data:
-                            await trip_crud.update_itinerary(
-                                db, it.id,
-                                ItineraryUpdate(**update_data)
-                            )
-                            applied_changes.append({
-                                "action": "reorder",
-                                "place_name": it.place.name,
-                                **update_data
-                            })
-                        break
-
-        # 업데이트된 여행 정보 조회
-        updated = await trip_crud.get_trip_by_id(db, trip.id)
-
-        trip_dict = {
-            "id": updated.id,
-            "title": updated.title,
-            "itineraries": [
-                {
-                    "id": it.id,
-                    "place_name": it.place.name,
-                    "day_number": it.day_number,
-                    "order_index": it.order_index
-                }
-                for it in sorted(
-                    updated.itineraries,
-                    key=lambda x: (x.day_number, x.order_index)
-                )
-            ]
-        }
+                ]
+            }
 
         return applied_changes, trip_dict
+
+    async def _apply_add(
+        self, db, trip, change, available_places, place_id_dict
+    ) -> Optional[dict]:
+        """장소 추가"""
+        existing_ids = {it.place_id for it in trip.itineraries}
+        place = None
+
+        if change.get("place_name"):
+            place = self._find_place_by_name(change["place_name"], available_places)
+
+        if not place and change.get("place_id"):
+            place = place_id_dict.get(change["place_id"])
+
+        if not place and change.get("category"):
+            cat = change["category"]
+            for p in available_places:
+                if p.id not in existing_ids and p.category and cat in p.category:
+                    place = p
+                    break
+
+        if place:
+            from Trip.dto import ItineraryCreate
+            day = change.get("day_number", 1)
+            order = change.get("order_index", 99)
+
+            await trip_crud.create_itinerary(
+                db, trip.id,
+                ItineraryCreate(
+                    place_id=place.id,
+                    day_number=day,
+                    order_index=order
+                )
+            )
+            return {"action": "add", "place_name": place.name, "day_number": day}
+        return None
+
+    async def _apply_remove(self, db, trip, change) -> Optional[dict]:
+        """장소 제거"""
+        target = self._find_itinerary_by_name(
+            change.get("place_name", ""), trip.itineraries
+        )
+        if target:
+            await trip_crud.delete_itinerary(db, target.id)
+            return {"action": "remove", "place_name": target.place.name}
+        return None
+
+    async def _apply_replace(
+        self, db, trip, change, available_places, place_id_dict
+    ) -> Optional[dict]:
+        """장소 교체"""
+        old_it = self._find_itinerary_by_name(
+            change.get("old_place", ""), trip.itineraries
+        )
+        new_place = self._find_place_by_name(
+            change.get("new_place", ""), available_places
+        )
+        if not new_place and change.get("place_id"):
+            new_place = place_id_dict.get(change["place_id"])
+
+        if old_it and new_place:
+            from Trip.dto import ItineraryUpdate
+            await trip_crud.update_itinerary(
+                db, old_it.id,
+                ItineraryUpdate(place_id=new_place.id)
+            )
+            return {
+                "action": "replace",
+                "old_place": old_it.place.name,
+                "new_place": new_place.name
+            }
+        return None
+
+    async def _apply_reorder(self, db, trip, change) -> Optional[dict]:
+        """순서 변경 (기존 일정 내 장소에서 검색)"""
+        target = self._find_itinerary_by_name(
+            change.get("place_name", ""), trip.itineraries
+        )
+        if not target:
+            return None
+
+        new_day = change.get("day_number")
+        new_order = change.get("new_order")
+
+        from Trip.dto import ItineraryUpdate
+        update_data = {}
+        if new_day is not None:
+            update_data["day_number"] = new_day
+        if new_order is not None:
+            update_data["order_index"] = new_order
+
+        if update_data:
+            await trip_crud.update_itinerary(
+                db, target.id,
+                ItineraryUpdate(**update_data)
+            )
+            return {"action": "reorder", "place_name": target.place.name, **update_data}
+        return None
+
+    async def _apply_modify(self, db, trip, change) -> Optional[dict]:
+        """시간/메모 수정"""
+        target = self._find_itinerary_by_name(
+            change.get("place_name", ""), trip.itineraries
+        )
+        if not target:
+            return None
+
+        from Trip.dto import ItineraryUpdate
+        update_data = {}
+
+        if change.get("stay_duration") is not None:
+            update_data["stay_duration"] = change["stay_duration"]
+        if change.get("memo") is not None:
+            update_data["memo"] = change["memo"]
+        if change.get("arrival_time") is not None:
+            update_data["arrival_time"] = change["arrival_time"]
+
+        if update_data:
+            await trip_crud.update_itinerary(
+                db, target.id,
+                ItineraryUpdate(**update_data)
+            )
+            return {"action": "modify", "place_name": target.place.name, **update_data}
+        return None
 
     async def get_chat_history(
         self,

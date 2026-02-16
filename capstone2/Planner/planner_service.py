@@ -1,5 +1,7 @@
 import json
 import re
+import logging
+import asyncio
 from typing import List, Optional, Dict
 from datetime import time
 from openai import OpenAI
@@ -20,6 +22,8 @@ from Recommend.preference_service import (
 from Planner.dto import GenerateRequest, GenerateResponse, GeneratedItinerary, DaySummary
 from Planner.route_optimizer import get_route_optimizer
 from Planner.time_constraint import get_time_constraint_service
+
+logger = logging.getLogger(__name__)
 
 
 class PlannerService:
@@ -52,44 +56,60 @@ class PlannerService:
         total_days = (request.end_date - request.start_date).days + 1
 
         # 2단계: 후보 장소 수집
+        print("[PLANNER] 2단계: 후보 장소 수집 시작")
         candidates = await self._gather_candidates(
             db, request, user_preference, total_days
         )
 
         if not candidates:
             raise ValueError("조건에 맞는 여행지가 없습니다")
+        print(f"[PLANNER] 2단계 완료: {len(candidates)}개 후보 장소")
 
         # 3단계: GPT 일정 초안 생성
+        print("[PLANNER] 3단계: GPT 일정 생성 시작")
         draft = await self._generate_with_gpt(
             candidates, request, user_preference, total_days
         )
+        print(f"[PLANNER] 3단계 완료: {len(draft.get('days', []))}일 일정 생성")
 
         # 4단계: 장소 딕셔너리로 변환
+        print("[PLANNER] 4단계: 장소 매핑 시작")
         place_dict = {c['place_id']: c for c in candidates}
         places_by_day = self._build_places_by_day(draft, place_dict)
+        print(f"[PLANNER] 4단계 완료: {sum(len(v) for v in places_by_day.values())}개 장소 매핑")
 
         # 5단계: 동선 최적화
-        optimized = self.route_optimizer.optimize(
+        print("[PLANNER] 5단계: 동선 최적화 시작")
+        optimized = await self.route_optimizer.optimize(
             places_by_day,
             request.start_location,
             request.end_location
         )
+        print("[PLANNER] 5단계 완료")
 
         # 6단계: 시간 제약 적용
+        print("[PLANNER] 6단계: 시간 제약 적용 시작")
         constrained = self.time_service.apply_constraints(
             optimized,
             user_preference,
             request.start_date
         )
+        print("[PLANNER] 6단계 완료")
+
+        # 경고 메시지 추출
+        warnings = constrained.pop('_warnings', [])
 
         # 7단계: DB 저장
+        print("[PLANNER] 7단계: DB 저장 시작")
         trip = await self._save_trip(
             db, user_id, request, constrained, user_preference
         )
+        print(f"[PLANNER] 7단계 완료: trip_id={trip.id}")
 
         # 8단계: 응답 생성
+        print("[PLANNER] 8단계: 응답 생성")
         return self._build_response(
-            trip, constrained, draft, request, total_days
+            trip, constrained, draft, request, total_days, warnings
         )
 
     async def _gather_candidates(
@@ -119,7 +139,17 @@ class PlannerService:
         # 추천 실행
         places = await self.recommender.recommend(db, condition, preference)
 
-        # 딕셔너리로 변환
+        # 딕셔너리로 변환 (readcount 포함을 위해 DB에서 Place 재조회)
+        place_ids = [p.place_id for p in places]
+        db_places = {}
+        if place_ids:
+            from sqlalchemy import select as sa_select
+            result = await db.execute(
+                sa_select(Place).where(Place.id.in_(place_ids))
+            )
+            for dp in result.scalars().all():
+                db_places[dp.id] = dp
+
         candidates = [
             {
                 "place_id": p.place_id,
@@ -133,12 +163,13 @@ class PlannerService:
                 "operating_hours": p.operating_hours,
                 "closed_days": p.closed_days,
                 "description": p.description,
+                "readcount": db_places[p.place_id].readcount if p.place_id in db_places else None,
                 "score": p.final_score
             }
             for p in places
         ]
 
-        # 필수 포함 장소 추가
+        # 필수 포함 장소 추가 (리스트 앞쪽에)
         if request.must_visit_places:
             existing_ids = {c['place_id'] for c in candidates}
             for place_id in request.must_visit_places:
@@ -171,7 +202,7 @@ class PlannerService:
         total_days: int
     ) -> dict:
         """GPT로 일정 초안 생성"""
-        # 장소 정보 문자열화
+        # 장소 정보 문자열화 (must_visit 장소는 무조건 포함되도록)
         places_info = self._format_places_for_gpt(candidates)
 
         # 선호도 정보
@@ -228,32 +259,49 @@ class PlannerService:
   }}
 }}"""
 
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "여행 일정 전문가입니다. JSON 형식으로만 응답합니다."
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=3000,
-            temperature=0.7
-        )
+        # 동기 OpenAI 호출을 별도 스레드에서 실행 (async 이벤트 루프 블로킹 방지)
+        def _call_gpt():
+            return self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "여행 일정 전문가입니다. JSON 형식으로만 응답합니다."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=3000,
+                temperature=0.7
+            )
+
+        response = await asyncio.to_thread(_call_gpt)
 
         result_text = response.choices[0].message.content
         return self._parse_gpt_response(result_text)
 
     def _format_places_for_gpt(self, candidates: List[dict]) -> str:
-        """GPT용 장소 정보 포맷팅"""
+        """GPT용 장소 정보 포맷팅 (must_visit 장소는 잘리지 않도록)"""
+        # must_visit 장소를 먼저 포함
+        must_visit_places = [c for c in candidates if c.get('must_visit')]
+        other_places = [c for c in candidates if not c.get('must_visit')]
+
+        # must_visit 장소는 전부 포함, 나머지는 30개까지
+        max_others = max(30 - len(must_visit_places), 10)
+        selected = must_visit_places + other_places[:max_others]
+
         lines = []
-        for c in candidates[:30]:  # 토큰 제한으로 30개까지만
-            tags_str = ', '.join(c.get('tags', [])[:3]) if c.get('tags') else ''
+        for c in selected:
+            tags_str = ', '.join(c.get('tags', [])[:5]) if c.get('tags') else ''
             must = " [필수]" if c.get('must_visit') else ""
+            popularity = f", 인기도: {c.get('readcount', 0)}" if c.get('readcount') else ""
+            desc_short = ""
+            if c.get('description'):
+                desc_short = f", 설명: {c['description'][:40]}..."
             lines.append(
                 f"- ID: {c['place_id']}, 이름: {c['name']}, "
                 f"카테고리: {c.get('category', '기타')}, "
-                f"태그: [{tags_str}], 점수: {c.get('score', 0):.2f}{must}"
+                f"태그: [{tags_str}], 점수: {c.get('score', 0):.2f}"
+                f"{popularity}{desc_short}{must}"
             )
         return '\n'.join(lines)
 
@@ -325,6 +373,7 @@ class PlannerService:
                     place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
                     place['selection_reason'] = place_data.get("reason", "AI 추천")
                     place['day_number'] = day_num
+                    # 키이름 통일 (category를 표준으로)
                     place['place_category'] = place.get('category')
                     place['place_name'] = place.get('name')
                     place['place_address'] = place.get('address')
@@ -342,45 +391,51 @@ class PlannerService:
         places_by_day: Dict[int, List[dict]],
         preference: Optional[UserPreference]
     ):
-        """Trip 및 Itinerary DB 저장"""
-        # Trip 생성
-        trip_data = TripCreate(
-            title=request.title,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            region=request.region,
-            conditions={
-                "max_places_per_day": request.max_places_per_day,
-                "themes": request.themes,
-                "must_visit_places": request.must_visit_places
-            }
-        )
+        """Trip 및 Itinerary DB 저장 (단일 트랜잭션)"""
+        try:
+            # Trip 생성
+            trip_data = TripCreate(
+                title=request.title,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                region=request.region,
+                conditions={
+                    "max_places_per_day": request.max_places_per_day,
+                    "themes": request.themes,
+                    "must_visit_places": request.must_visit_places
+                }
+            )
 
-        trip = await trip_crud.create_trip(
-            db, user_id, trip_data,
-            generation_method="ai",
-            preference_snapshot=preference_to_snapshot(preference)
-        )
+            trip = await trip_crud.create_trip(
+                db, user_id, trip_data,
+                generation_method="ai",
+                preference_snapshot=preference_to_snapshot(preference)
+            )
 
-        # Itinerary 일괄 생성
-        itinerary_items = []
-        for day_num, places in places_by_day.items():
-            for place in places:
-                itinerary_items.append({
-                    "place_id": place["place_id"],
-                    "day_number": day_num,
-                    "order_index": place.get("order_index", 1),
-                    "arrival_time": place.get("suggested_arrival_time"),
-                    "stay_duration": place.get("suggested_stay_duration"),
-                    "travel_time_from_prev": place.get("travel_time_from_prev"),
-                    "transport_mode": place.get("transport_mode"),
-                    "memo": place.get("selection_reason")
-                })
+            # Itinerary 일괄 생성
+            itinerary_items = []
+            for day_num, places in places_by_day.items():
+                for place in places:
+                    itinerary_items.append({
+                        "place_id": place["place_id"],
+                        "day_number": day_num,
+                        "order_index": place.get("order_index", 1),
+                        "arrival_time": place.get("suggested_arrival_time"),
+                        "stay_duration": place.get("suggested_stay_duration"),
+                        "travel_time_from_prev": place.get("travel_time_from_prev"),
+                        "transport_mode": place.get("transport_mode"),
+                        "memo": place.get("selection_reason")
+                    })
 
-        await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
+            await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
 
-        # Trip 다시 로드 (itineraries 포함)
-        return await trip_crud.get_trip_by_id(db, trip.id, user_id)
+            # Trip 다시 로드 (itineraries 포함)
+            return await trip_crud.get_trip_by_id(db, trip.id, user_id)
+
+        except Exception as e:
+            logger.error(f"Trip 저장 실패: {e}")
+            await db.rollback()
+            raise
 
     def _build_response(
         self,
@@ -388,7 +443,8 @@ class PlannerService:
         places_by_day: Dict[int, List[dict]],
         draft: dict,
         request: GenerateRequest,
-        total_days: int
+        total_days: int,
+        warnings: List[str] = None
     ) -> GenerateResponse:
         """응답 객체 생성"""
         days = []
@@ -446,6 +502,11 @@ class PlannerService:
         # 최적화 점수 계산
         opt_score = self.route_optimizer.calculate_optimization_score(places_by_day)
 
+        # 경고가 있으면 trip_summary에 포함
+        trip_summary = draft.get("trip_summary", "AI가 생성한 여행 일정입니다.")
+        if warnings:
+            trip_summary += " [주의: " + "; ".join(warnings) + "]"
+
         return GenerateResponse(
             trip_id=trip.id,
             title=request.title,
@@ -457,7 +518,7 @@ class PlannerService:
             total_places=total_places,
             total_travel_time=total_travel,
             optimization_score=round(opt_score, 2),
-            trip_summary=draft.get("trip_summary", "AI가 생성한 여행 일정입니다."),
+            trip_summary=trip_summary,
             generation_method="ai"
         )
 

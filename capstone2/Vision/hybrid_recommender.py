@@ -88,8 +88,9 @@ class HybridRecommender:
             # 데이터 적으면 고정값 사용
             return self.FALLBACK_HIGH, self.FALLBACK_LOW
 
-        # Top-K 평균 계산 (상위 절반)
-        top_half = scores[:max(len(scores) // 2, 1)]
+        # Top-K 평균 계산 (상위 절반, 최소 2개 사용)
+        top_count = max(len(scores) // 2, 2)
+        top_half = scores[:min(top_count, len(scores))]
         avg_score = np.mean(top_half)
 
         # 동적 임계값
@@ -309,24 +310,27 @@ class HybridRecommender:
         method: str
     ) -> List[RecommendationResult]:
         """CLIP 결과만으로 RecommendationResult 생성"""
-        return [
-            RecommendationResult(
-                place_id=place["place_id"],
-                name=place["name"],
-                address=place["address"],
-                latitude=place["latitude"],
-                longitude=place["longitude"],
-                image_url=place["image_url"],
-                tags=place["tags"],
-                category=place["category"],
-                clip_score=score,
-                tag_score=0.0,
-                final_score=score,
-                method=method,
-                reason=f"이미지 유사도 {score:.0%}"
-            )
-            for place, score in clip_results
-        ]
+        results = []
+        for place, score in clip_results:
+            try:
+                results.append(RecommendationResult(
+                    place_id=place["place_id"],
+                    name=place.get("name", ""),
+                    address=place.get("address", ""),
+                    latitude=place.get("latitude", 0.0),
+                    longitude=place.get("longitude", 0.0),
+                    image_url=place.get("image_url", ""),
+                    tags=place.get("tags", []),
+                    category=place.get("category", ""),
+                    clip_score=score,
+                    tag_score=0.0,
+                    final_score=score,
+                    method=method,
+                    reason=f"이미지 유사도 {score:.0%}"
+                ))
+            except KeyError:
+                continue
+        return results
 
     def _generate_reason(
         self,

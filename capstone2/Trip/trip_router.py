@@ -97,6 +97,8 @@ async def create_trip(
         )
 
     trip = await crud.create_trip(db, current_user.id, data)
+    # itineraries 관계를 eager load하기 위해 다시 조회
+    trip = await crud.get_trip_by_id(db, trip.id, current_user.id)
     return build_trip_detail_response(trip)
 
 
@@ -214,10 +216,10 @@ async def add_itinerary(
 
     # 일차 유효성 검사
     total_days = (trip.end_date - trip.start_date).days + 1
-    if data.day_number > total_days:
+    if data.day_number < 1 or data.day_number > total_days:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"일차는 {total_days}일을 초과할 수 없습니다"
+            detail=f"일차는 1~{total_days} 범위여야 합니다"
         )
 
     itinerary = await crud.create_itinerary(db, trip_id, data)
@@ -257,15 +259,20 @@ async def update_itinerary(
         )
 
     # 일차 변경 시 유효성 검사
-    if data.day_number:
+    if data.day_number is not None:
         total_days = (trip.end_date - trip.start_date).days + 1
-        if data.day_number > total_days:
+        if data.day_number < 1 or data.day_number > total_days:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"일차는 {total_days}일을 초과할 수 없습니다"
+                detail=f"일차는 1~{total_days} 범위여야 합니다"
             )
 
     updated = await crud.update_itinerary(db, itinerary_id, data)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="일정을 찾을 수 없습니다"
+        )
     return build_itinerary_response(updated)
 
 
@@ -316,10 +323,10 @@ async def reorder_itineraries(
     # 일차 유효성 검사
     total_days = (trip.end_date - trip.start_date).days + 1
     for item in data.items:
-        if item.day_number > total_days:
+        if item.day_number < 1 or item.day_number > total_days:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"일차는 {total_days}일을 초과할 수 없습니다"
+                detail=f"일차는 1~{total_days} 범위여야 합니다"
             )
 
     await crud.reorder_itineraries(db, trip_id, data.items)

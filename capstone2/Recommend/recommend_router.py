@@ -151,7 +151,7 @@ async def get_popular_places(
     if region:
         query = query.where(Place.address.contains(region))
 
-    query = query.limit(limit)
+    query = query.order_by(Place.readcount.desc().nullslast()).limit(limit)
 
     result = await db.execute(query)
     places = result.scalars().all()
