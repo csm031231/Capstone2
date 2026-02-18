@@ -25,20 +25,11 @@ def init_db(config) -> None:
         + f"@{postgres_endpoint}:{postgres_port}/{postgres_table}"
     )
     
-    # AWS RDS SSL 설정 (프로덕션 환경)
-    # 로컬 개발 시에는 ssl=False 사용
-    import os
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
-    
-    if is_production:
-        # SSL 인증서 검증 활성화
-        ssl_context = ssl.create_default_context()
-        # RDS 인증서 다운로드 필요 시:
-        # ssl_context.load_verify_locations('/path/to/rds-ca-2019-root.pem')
-        connect_args = {"ssl": ssl_context}
-    else:
-        # 로컬 개발: SSL 비활성화
-        connect_args = {"ssl": False}
+    # AWS RDS SSL 설정 (RDS는 SSL 필수)
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    connect_args = {"ssl": ssl_context}
     
     print(f"Connecting to DB at {postgres_endpoint}...")
 
