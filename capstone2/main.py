@@ -21,7 +21,7 @@ from Festival.router import router as festival_router
 logger = logging.getLogger(__name__)
 
 # 초기 수집 대상 지역
-DEFAULT_COLLECT_AREAS = ["부산", "제주", "강원", "서울", "경주"]
+DEFAULT_COLLECT_AREAS = ["부산", "제주", "강원", "서울", "경북"]
 DEFAULT_MAX_PER_AREA = 100
 
 

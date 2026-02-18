@@ -122,7 +122,7 @@ async def collect_by_keyword(
 
 @router.post("/collect/bulk")
 async def collect_bulk(
-    areas: List[str] = ["부산", "제주", "강원", "경주"],
+    areas: List[str] = ["부산", "제주", "강원", "경북"],
     max_per_area: int = 100,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(provide_session)
