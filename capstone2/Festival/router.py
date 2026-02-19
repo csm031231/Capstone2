@@ -459,20 +459,20 @@ async def get_festival_detail(
     
     인증 불필요
     """
-    from DataCollector.tour_api_service import get_tour_api_service
-    
+    from DataCollector.tour_api_service import get_tour_api_service, TourAPIRateLimitError
+
     tour_api = get_tour_api_service()
-    
+
     try:
         # 공통 정보 + 소개 정보 조회
         detail = await tour_api.get_full_place_info(festival_id, 15)  # 15 = 축제공연행사
-        
-        if not detail:
+
+        if detail is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="축제 정보를 찾을 수 없습니다"
             )
-        
+
         # 필요한 정보만 추출
         return {
             "success": True,
@@ -493,9 +493,14 @@ async def get_festival_detail(
                 "sponsor1tel": detail.get("sponsor1tel", ""),
             }
         }
-    
+
     except HTTPException:
         raise
+    except TourAPIRateLimitError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TourAPI 요청 제한 중입니다. 잠시 후 다시 시도해주세요."
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

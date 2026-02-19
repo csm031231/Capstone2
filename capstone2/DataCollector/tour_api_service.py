@@ -1,9 +1,12 @@
 import httpx
 import asyncio
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from core.config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 class TourAPIService:
@@ -296,26 +299,58 @@ class TourAPIService:
     async def get_full_place_info(
         self,
         content_id: int,
-        content_type_id: int
+        content_type_id: int,
+        max_retries: int = 3
     ) -> Dict[str, Any]:
         """
         관광지 전체 정보 조회 (공통 + 소개)
+        429 응답 시 최대 max_retries회 재시도 (지수 백오프)
+        rate limit 소진 시 TourAPIRateLimitError 발생
         """
-        common, intro = await asyncio.gather(
-            self.get_detail_common(content_id),
-            self.get_detail_intro(content_id, content_type_id),
-            return_exceptions=True
-        )
+        for attempt in range(max_retries):
+            try:
+                common = await self.get_detail_common(content_id)
+            except Exception as e:
+                if "429" in str(e):
+                    if attempt < max_retries - 1:
+                        wait = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
+                        logger.warning(f"TourAPI 429 (content_id={content_id}), {wait}초 후 재시도 ({attempt+1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                        continue
+                    # 재시도 소진 → 호출자에게 rate limit 알림
+                    raise TourAPIRateLimitError(f"TourAPI 요청 제한 초과 (content_id={content_id})")
+                logger.warning(f"get_detail_common 실패 (content_id={content_id}): {e}")
+                common = None
 
-        result = {}
+            await asyncio.sleep(0.5)  # common/intro 사이 간격
 
-        if isinstance(common, dict):
-            result.update(common)
+            try:
+                intro = await self.get_detail_intro(content_id, content_type_id)
+            except Exception as e:
+                if "429" in str(e):
+                    if attempt < max_retries - 1:
+                        wait = 2.0 * (2 ** attempt)
+                        logger.warning(f"TourAPI 429 intro (content_id={content_id}), {wait}초 후 재시도 ({attempt+1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                        continue
+                    raise TourAPIRateLimitError(f"TourAPI 요청 제한 초과 (content_id={content_id})")
+                logger.warning(f"get_detail_intro 실패 (content_id={content_id}): {e}")
+                intro = None
 
-        if isinstance(intro, dict):
-            result.update(intro)
+            result = {}
+            if isinstance(common, dict):
+                result.update(common)
+            if isinstance(intro, dict):
+                result.update(intro)
 
-        return result
+            return result if result else None
+
+        return None
+
+
+class TourAPIRateLimitError(Exception):
+    """TourAPI 429 rate limit 초과 예외"""
+    pass
 
     # cat3 소분류 코드 → 한글 태그 매핑
     CAT3_TAG_MAP = {

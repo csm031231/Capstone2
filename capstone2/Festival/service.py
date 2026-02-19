@@ -87,22 +87,17 @@ class FestivalService:
                 print(f"축제 검색 오류: {e}")
                 break
 
-        # 5. 상세 정보 조회 및 변환
+        # 5. 목록 데이터만으로 DTO 변환 (상세 API 호출 없음 - 429 방지)
+        # description, homepage, playtime 등 부가정보는 /{id}/detail 엔드포인트에서만 조회
         festival_infos = []
         today = datetime.now().date()
 
         for item in festivals[:request.max_items]:
             try:
-                content_id = int(item.get("contentid", 0))
-                # 상세 정보 조회 (15 = 축제공연행사 타입)
-                detail = await self.tour_api.get_full_place_info(content_id, 15)
-                
-                # FestivalInfo DTO로 변환
-                festival_info = self._parse_festival_data(item, detail, today)
+                festival_info = self._parse_festival_data(item, None, today)
                 festival_infos.append(festival_info)
-
             except Exception as e:
-                print(f"축제 상세 조회 오류 (ID: {item.get('contentid')}): {e}")
+                print(f"축제 데이터 변환 오류 (ID: {item.get('contentid')}): {e}")
                 continue
 
         return {
@@ -351,25 +346,19 @@ class FestivalService:
                     is_upcoming, d_start, d_end = True, (s_dt - today).days, (e_dt - today).days
             except ValueError: pass
 
-        # 상세 정보 통합 (안전한 할당 및 예외 로깅)
-        desc = tel = home = e_place = p_time = prog = fee = None
-        if detail:
-            try:
-                # detail이 dict이 아닐 수 있으므로 안전하게 접근
-                if isinstance(detail, dict):
-                    desc = self.tour_api._clean_html(detail.get("overview", ""))
-                    tel = detail.get("tel", "")
-                    home = detail.get("homepage", "")
-                    e_place = detail.get("eventplace", "")
-                    p_time = self.tour_api._clean_html(detail.get("playtime", ""))
-                    prog = self.tour_api._clean_html(detail.get("program", ""))
-                    fee = self.tour_api._clean_html(detail.get("usetimefestival", ""))
-                else:
-                    print(f"WARNING Festival: unexpected detail type for content {content_id}: {type(detail)}")
-            except Exception as ex:
-                print(f"ERROR Festival: parsing detail failed for content {content_id}: {ex}")
-                import traceback
-                traceback.print_exc()
+        # tel은 목록 데이터에도 있으므로 기본값으로 사용
+        tel = item.get("tel", "")
+        desc = home = e_place = p_time = prog = fee = None
+
+        # 상세 정보가 있는 경우 덮어쓰기 (/{id}/detail 엔드포인트에서 호출 시)
+        if detail and isinstance(detail, dict):
+            desc = self.tour_api._clean_html(detail.get("overview", ""))
+            tel = detail.get("tel", "") or tel  # detail에 없으면 목록 tel 유지
+            home = detail.get("homepage", "")
+            e_place = detail.get("eventplace", "")
+            p_time = self.tour_api._clean_html(detail.get("playtime", ""))
+            prog = self.tour_api._clean_html(detail.get("program", ""))
+            fee = self.tour_api._clean_html(detail.get("usetimefestival", ""))
 
         return FestivalInfo(
             id=content_id, title=title, address=address, region=region,
