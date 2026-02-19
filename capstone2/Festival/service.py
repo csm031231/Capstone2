@@ -1,12 +1,12 @@
 import asyncio
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from DataCollector.tour_api_service import TourAPIService, get_tour_api_service
 from Festival.dto import FestivalInfo, FestivalSearchRequest
-from core.models import Place  #
+from core.models import Place  # DB 모델 임포트
 
 
 class FestivalService:
@@ -26,6 +26,7 @@ class FestivalService:
         request: FestivalSearchRequest
     ) -> Dict[str, Any]:
         """축제 검색 메인 로직"""
+        print("DEBUG Festival: search request =", request.dict())
         # 1. 지역 코드 변환
         area_code = None
         if request.region:
@@ -60,16 +61,23 @@ class FestivalService:
                 if not items:
                     break
 
-                # 4. 키워드 필터링
-                if request.keyword:
+                # 4. 키워드 필터링 (플레이스홀더 처리 포함)
+                kw = request.keyword
+                if kw:
+                    kw = kw.strip()
+                    # 프론트에서 기본값으로 'string' 같은 플레이스홀더가 넘어오는 경우 무시
+                    if not kw or kw.lower() in ("string", "undefined", "null"):
+                        kw = None
+
+                if kw:
                     items = [
                         item for item in items
-                        if request.keyword.lower() in item.get("title", "").lower()
+                        if kw.lower() in (item.get("title", "") or "").lower()
                     ]
 
                 festivals.extend(items)
 
-                if len(items) < 50:
+                if len(items) < 50:  # 마지막 페이지 확인
                     break
 
                 page += 1
@@ -86,10 +94,13 @@ class FestivalService:
         for item in festivals[:request.max_items]:
             try:
                 content_id = int(item.get("contentid", 0))
-                detail = await self.tour_api.get_full_place_info(content_id, 15)  # 15 = 축제타입
+                # 상세 정보 조회 (15 = 축제공연행사 타입)
+                detail = await self.tour_api.get_full_place_info(content_id, 15)
                 
+                # FestivalInfo DTO로 변환
                 festival_info = self._parse_festival_data(item, detail, today)
                 festival_infos.append(festival_info)
+
             except Exception as e:
                 print(f"축제 상세 조회 오류 (ID: {item.get('contentid')}): {e}")
                 continue
@@ -112,19 +123,31 @@ class FestivalService:
         db: AsyncSession,
         year: int,
         month: int,
-        region: Optional[str] = None
+        region: Optional[str] = None,
+        max_duration_days: int = 10  # ⭐ 최대 기간 제한 추가
     ) -> Dict[str, Any]:
-        """월별 축제 캘린더 데이터 생성"""
+        """
+        월별 축제 캘린더 데이터 생성 (필터링 개선 버전)
+        
+          Args:
+              max_duration_days: 이 일수를 초과하는 축제는 제외 (기본 10일) - 비현실적으로 긴 축제(예: 연중 행사)도 제외
+                        예: 1월1일~12월31일 같은 연중 축제 제외
+        """
         from calendar import monthrange
         last_day = monthrange(year, month)[1]
         
-        start_date = date(year, month, 1)
-        end_date = date(year, month, last_day)
+        # 해당 월의 시작/끝
+        month_start = date(year, month, 1)
+        month_end = date(year, month, last_day)
+        
+        # 검색 범위: 전월 ~ 다음달 (해당 월에 걸쳐있는 축제 포함)
+        search_start = month_start - timedelta(days=60)
+        search_end = month_end + timedelta(days=60)
 
         request = FestivalSearchRequest(
             region=region,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=search_start,
+            end_date=search_end,
             max_items=200
         )
 
@@ -132,18 +155,68 @@ class FestivalService:
         if not result["success"]:
             return result
 
+        # ⭐ 필터링 및 그룹화
         festivals_by_date = {}
+        filtered_festivals = []
+        excluded_count = 0
+        
         for festival in result["festivals"]:
-            if not festival.event_start_date:
+            # 날짜 정보 없으면 스킵
+            if not festival.event_start_date or not festival.event_end_date:
+                excluded_count += 1
                 continue
+            
             try:
-                start_dt = datetime.strptime(festival.event_start_date, "%Y%m%d").date()
-                if start_dt.year == year and start_dt.month == month:
-                    date_key = festival.event_start_date
+                f_start = datetime.strptime(festival.event_start_date, "%Y%m%d").date()
+                f_end = datetime.strptime(festival.event_end_date, "%Y%m%d").date()
+                
+                # ⭐ 필터 1: 기간이 너무 긴 축제 제외
+                duration = (f_end - f_start).days
+                # 제외 조건:
+                # 1) 요청된 최대 기간을 초과
+                # 2) 비현실적으로 긴 기간 (예: 거의 연중 행사)인 경우(>=300일)
+                # 3) 정확히 연초~연말 (1월1일 ~ 12월31일)인 경우
+                if (duration > max_duration_days) or (duration >= 300) or (
+                    f_start.month == 1 and f_start.day == 1 and f_end.month == 12 and f_end.day == 31
+                ):
+                    excluded_count += 1
+                    continue
+                
+                # ⭐ 필터 2: 해당 월과 겹치는지 확인
+                if f_end < month_start or f_start > month_end:
+                    continue  # 해당 월과 안 겹침
+                
+                # ⭐ 해당 월에 포함되는 날짜만 추출
+                actual_start = max(f_start, month_start)
+                actual_end = min(f_end, month_end)
+                
+                # 날짜별로 그룹화
+                current_date = actual_start
+                while current_date <= actual_end:
+                    date_key = current_date.strftime("%Y%m%d")
+                    
                     if date_key not in festivals_by_date:
                         festivals_by_date[date_key] = []
-                    festivals_by_date[date_key].append(festival)
+                    
+                    # ⭐ 캘린더용 간략 정보만 포함
+                    calendar_item = {
+                        "id": festival.id,
+                        "title": festival.title,
+                        "is_ongoing": festival.is_ongoing,
+                        "is_upcoming": festival.is_upcoming,
+                        "event_start_date": festival.event_start_date,
+                        "event_end_date": festival.event_end_date,
+                        "image_url": festival.image_url,
+                        "region": festival.region,
+                    }
+                    
+                    festivals_by_date[date_key].append(calendar_item)
+                    current_date += timedelta(days=1)
+                
+                filtered_festivals.append(festival)
+                
             except ValueError:
+                excluded_count += 1
                 continue
 
         return {
@@ -151,7 +224,70 @@ class FestivalService:
             "year": year,
             "month": month,
             "festivals_by_date": festivals_by_date,
-            "total_count": len(result["festivals"])
+            "total_count": len(filtered_festivals),
+            "excluded_count": excluded_count,  # ⭐ 제외된 축제 수
+            "filter_applied": {
+                "max_duration_days": max_duration_days,
+                "region": region
+            }
+        }
+
+    async def get_calendar_summary(
+        self,
+        db: AsyncSession,
+        year: int,
+        month: int,
+        region: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        ⭐ 신규: 캘린더용 초경량 요약 데이터
+        
+        각 날짜별로 축제 개수와 대표 축제 1개만 반환
+        → 프론트 렌더링 속도 최적화
+        """
+        full_data = await self.get_festivals_by_month(db, year, month, region)
+        
+        if not full_data["success"]:
+            return full_data
+        
+        # 날짜별 요약
+        summary = {}
+        for date_key, festivals in full_data["festivals_by_date"].items():
+            if not festivals:
+                continue
+            
+            # 대표 축제 선택 (진행중 > 예정 > 첫번째)
+            representative = None
+            for fest in festivals:
+                if fest.get("is_ongoing"):
+                    representative = fest
+                    break
+            
+            if not representative:
+                for fest in festivals:
+                    if fest.get("is_upcoming"):
+                        representative = fest
+                        break
+            
+            if not representative:
+                representative = festivals[0]
+            
+            summary[date_key] = {
+                "count": len(festivals),
+                "representative": {
+                    "id": representative["id"],
+                    "title": representative["title"],
+                    "image_url": representative.get("image_url")
+                }
+            }
+        
+        return {
+            "success": True,
+            "year": year,
+            "month": month,
+            "dates": summary,
+            "total_festival_count": full_data["total_count"],
+            "excluded_count": full_data["excluded_count"]
         }
 
     async def get_ongoing_festivals(
@@ -189,18 +325,21 @@ class FestivalService:
         detail: Optional[Dict[str, Any]],
         today: date
     ) -> FestivalInfo:
-        """API 데이터를 FestivalInfo DTO로 변환"""
+        """API 원본 데이터를 FestivalInfo DTO로 변환"""
         content_id = int(item.get("contentid", 0))
         title = item.get("title", "")
         address = f"{item.get('addr1', '')} {item.get('addr2', '')}".strip()
         
+        # 지역 추출
         region = next((r for r in self.tour_api.AREA_CODE.keys() if r in address), None)
 
+        # 좌표 및 날짜
         latitude = float(item.get("mapy", 0)) if item.get("mapy") else None
         longitude = float(item.get("mapx", 0)) if item.get("mapx") else None
         event_start_date = item.get("eventstartdate")
         event_end_date = item.get("eventenddate")
 
+        # 상태 계산
         is_ongoing, is_upcoming, d_start, d_end = False, False, None, None
         if event_start_date and event_end_date:
             try:
@@ -212,15 +351,25 @@ class FestivalService:
                     is_upcoming, d_start, d_end = True, (s_dt - today).days, (e_dt - today).days
             except ValueError: pass
 
-        desc, tel, home, e_place, p_time, prog, fee = [None] * 7
+        # 상세 정보 통합 (안전한 할당 및 예외 로깅)
+        desc = tel = home = e_place = p_time = prog = fee = None
         if detail:
-            desc = self.tour_api._clean_html(detail.get("overview", ""))
-            tel = detail.get("tel", "")
-            home = detail.get("homepage", "")
-            e_place = detail.get("eventplace", "")
-            p_time = self.tour_api._clean_html(detail.get("playtime", ""))
-            prog = self.tour_api._clean_html(detail.get("program", ""))
-            fee = self.tour_api._clean_html(detail.get("usetimefestival", ""))
+            try:
+                # detail이 dict이 아닐 수 있으므로 안전하게 접근
+                if isinstance(detail, dict):
+                    desc = self.tour_api._clean_html(detail.get("overview", ""))
+                    tel = detail.get("tel", "")
+                    home = detail.get("homepage", "")
+                    e_place = detail.get("eventplace", "")
+                    p_time = self.tour_api._clean_html(detail.get("playtime", ""))
+                    prog = self.tour_api._clean_html(detail.get("program", ""))
+                    fee = self.tour_api._clean_html(detail.get("usetimefestival", ""))
+                else:
+                    print(f"WARNING Festival: unexpected detail type for content {content_id}: {type(detail)}")
+            except Exception as ex:
+                print(f"ERROR Festival: parsing detail failed for content {content_id}: {ex}")
+                import traceback
+                traceback.print_exc()
 
         return FestivalInfo(
             id=content_id, title=title, address=address, region=region,
@@ -232,35 +381,27 @@ class FestivalService:
             is_upcoming=is_upcoming, days_until_start=d_start, days_until_end=d_end
         )
 
-    # ==================== 2. 축제 → Place 변환 및 저장 로직 (핵심 추가) ====================
+    # ==================== 2. DB 저장 및 관리 로직 (신규) ====================
 
     async def save_festival_as_place(
         self,
         db: AsyncSession,
         festival_id: int
     ) -> int:
-        """
-        축제 정보를 Place 테이블에 저장하여 일정(Itinerary)에 넣을 수 있게 합니다.
-        """
-        # 1. 축제 상세 정보 가져오기
+        """축제를 Place 테이블에 저장하여 여행 일정에 포함시킵니다."""
+        # 1. 상세 정보 확인
         detail = await self.tour_api.get_full_place_info(festival_id, 15)
         if not detail:
             raise ValueError("축제 정보를 찾을 수 없습니다")
         
-        # 2. 이미 저장되어 있는지 확인 (중복 방지)
+        # 2. 중복 체크
         title = detail.get("title", "")
-        existing = await db.execute(
-            select(Place).where(
-                Place.name == title, 
-                Place.is_festival == True
-            )
-        )
+        existing = await db.execute(select(Place).where(Place.name == title, Place.is_festival == True))
         existing_place = existing.scalar_one_or_none()
         if existing_place:
             return existing_place.id
         
-        # 3. 새로운 Place 객체 생성 및 매핑
-        # 기획안의 7.1, 7.2 운영 정보 제공 기능을 반영합니다.
+        # 3. 신규 Place 생성
         place = Place(
             name=title,
             category="축제/행사",
@@ -270,13 +411,9 @@ class FestivalService:
             description=self.tour_api._clean_html(detail.get("overview", "")),
             image_url=detail.get("firstimage"),
             tags=["축제"],
-            
-            # 축제 전용 필드 (일정 생성 시 기간 확인용)
             is_festival=True,
             event_start_date=detail.get("eventstartdate"),
             event_end_date=detail.get("eventenddate"),
-            
-            # 운영 정보 안내 (기능 7.2 반영)
             operating_hours=self.tour_api._clean_html(detail.get("playtime", "")),
             fee_info=self.tour_api._clean_html(detail.get("usetimefestival", ""))
         )

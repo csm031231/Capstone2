@@ -176,13 +176,21 @@ class TourAPIService:
                 
                 response.raise_for_status()
                 data = response.json()
-                
-                # 응답 구조 확인
+
+                # 응답 구조 확인 — 전체 응답을 출력하여 API의 실제 반환값을 확인
+                print("DEBUG TourAPI: 전체 응답 =", data)
+
+                # 일부 API는 최상위에 resultCode/resultMsg를, 일부는 response.header에 포함시킴
                 header = data.get("response", {}).get("header", {})
-                result_code = header.get("resultCode")
-                result_msg = header.get("resultMsg")
-                
+                result_code = header.get("resultCode") or data.get("resultCode")
+                result_msg = header.get("resultMsg") or data.get("resultMsg")
                 print(f"DEBUG TourAPI: 결과 코드 = {result_code}, 메시지 = {result_msg}")
+
+                # 에러 코드인 경우 파싱 중단
+                # 한국관광공사 API는 성공 코드로 '0000'을 반환하므로 이를 허용하도록 처리
+                if result_code and str(result_code) not in ("00", "0000", "0"):
+                    print(f"ERROR TourAPI: API error {result_code} - {result_msg}")
+                    return []
 
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
 

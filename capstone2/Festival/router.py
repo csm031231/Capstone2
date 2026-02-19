@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from datetime import date
+from datetime import date, datetime
 
 from core.database import provide_session
 from core.models import User
@@ -57,17 +57,37 @@ async def search_festivals(
         )
 
 
-@router.get("/calendar/{year}/{month}", response_model=FestivalCalendarResponse)
+# ==================== ⭐ 캘린더 API (개선) ====================
+
+@router.get("/calendar/{year}/{month}")
 async def get_festival_calendar(
     year: int,
     month: int,
     region: Optional[str] = Query(None, description="지역 필터 (선택)"),
+    max_duration: int = Query(
+        10, 
+        ge=10, 
+        le=365, 
+        description="최대 축제 기간 (일). 이보다 긴 축제는 제외됩니다."
+    ),
     db: AsyncSession = Depends(provide_session)
 ):
     """
-    월별 축제 캘린더
+    월별 축제 캘린더 (필터링 개선 버전)
     
     특정 연월에 진행되는 축제 목록을 날짜별로 그룹화하여 반환
+    
+    ⭐ 개선사항:
+    - 너무 긴 기간의 축제 자동 필터링 (기본 30일 초과 제외)
+    - 해당 월에 실제로 진행되는 날짜만 표시
+    - 제외된 축제 수 통계 제공
+    
+    Parameters:
+        - year: 연도 (2024~2030)
+        - month: 월 (1~12)
+        - region: 지역명 (서울, 부산 등)
+                - max_duration: 최대 기간 제한 (기본 10일)
+                    예: 30으로 설정 시 1월1일~12월31일 같은 연중 축제 제외
     
     인증 불필요
     """
@@ -87,15 +107,24 @@ async def get_festival_calendar(
     service = get_festival_service()
     
     try:
-        result = await service.get_festivals_by_month(db, year, month, region)
-        
-        return FestivalCalendarResponse(
-            success=result["success"],
-            year=result["year"],
-            month=result["month"],
-            festivals_by_date=result["festivals_by_date"],
-            total_count=result["total_count"]
+        result = await service.get_festivals_by_month(
+            db, 
+            year, 
+            month, 
+            region,
+            max_duration_days=max_duration  # ⭐ 필터링 파라미터 추가
         )
+        
+        return {
+            "success": result["success"],
+            "year": result["year"],
+            "month": result["month"],
+            "festivals_by_date": result["festivals_by_date"],
+            "total_count": result["total_count"],
+            "excluded_count": result.get("excluded_count", 0),  # ⭐ 제외 통계
+            "filter_applied": result.get("filter_applied", {}),
+            "message": f"{result['total_count']}개 축제 ({result.get('excluded_count', 0)}개 제외됨)"
+        }
     
     except Exception as e:
         raise HTTPException(
@@ -103,6 +132,134 @@ async def get_festival_calendar(
             detail=f"캘린더 조회 중 오류 발생: {str(e)}"
         )
 
+
+@router.get("/calendar/{year}/{month}/summary")
+async def get_calendar_summary(
+    year: int,
+    month: int,
+    region: Optional[str] = Query(None, description="지역 필터 (선택)"),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    ⭐ 신규: 월별 캘린더 요약 (초경량 버전)
+    
+    각 날짜별로 축제 개수와 대표 축제 1개만 반환
+    → 캘린더 UI 렌더링 최적화용
+    
+    응답 예시:
+    {
+      "dates": {
+        "20250301": {
+          "count": 3,
+          "representative": {
+            "id": 123456,
+            "title": "서울 벚꽃 축제",
+            "image_url": "https://..."
+          }
+        }
+      }
+    }
+    
+    사용 시나리오:
+    - 캘린더에 점이나 뱃지 표시용
+    - 날짜 클릭 시 전체 목록은 별도 API 호출
+    
+    인증 불필요
+    """
+    # 유효성 검사
+    if year < 2024 or year > 2030:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="연도는 2024~2030 사이여야 합니다"
+        )
+    
+    if month < 1 or month > 12:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="월은 1~12 사이여야 합니다"
+        )
+    
+    service = get_festival_service()
+    
+    try:
+        result = await service.get_calendar_summary(db, year, month, region)
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"캘린더 요약 조회 중 오류 발생: {str(e)}"
+        )
+
+
+@router.get("/calendar/date/{date_str}")
+async def get_festivals_by_specific_date(
+    date_str: str,
+    region: Optional[str] = Query(None, description="지역 필터 (선택)"),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    ⭐ 신규: 특정 날짜의 축제 목록
+    
+    캘린더에서 날짜를 클릭했을 때 사용
+    
+    Parameters:
+        - date_str: 날짜 (YYYYMMDD, 예: 20250301)
+        - region: 지역 필터 (선택)
+    
+    인증 불필요
+    """
+    # 날짜 형식 검증
+    if not date_str.isdigit() or len(date_str) != 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="날짜 형식이 올바르지 않습니다 (YYYYMMDD 형식, 예: 20250301)"
+        )
+    try:
+        target_date = datetime.strptime(date_str, "%Y%m%d").date()
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="날짜 형식이 올바르지 않습니다 (YYYYMMDD 형식)"
+        )
+    
+    year = target_date.year
+    month = target_date.month
+    
+    service = get_festival_service()
+    
+    try:
+        # 해당 월 데이터 가져오기
+        result = await service.get_festivals_by_month(db, year, month, region)
+        
+        if not result["success"]:
+            return {
+                "success": False,
+                "date": date_str,
+                "festivals": [],
+                "message": "축제를 찾을 수 없습니다."
+            }
+        
+        # 특정 날짜의 축제만 추출
+        festivals_on_date = result["festivals_by_date"].get(date_str, [])
+        
+        return {
+            "success": True,
+            "date": date_str,
+            "festivals": festivals_on_date,
+            "count": len(festivals_on_date),
+            "message": f"{target_date.year}년 {target_date.month}월 {target_date.day}일의 축제 {len(festivals_on_date)}개"
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"날짜별 축제 조회 중 오류 발생: {str(e)}"
+        )
+
+
+# ==================== 기타 축제 조회 API ====================
 
 @router.get("/ongoing")
 async def get_ongoing_festivals(
@@ -151,7 +308,7 @@ async def get_upcoming_festivals(
     
     인증 불필요
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     today = datetime.now().date()
     end_date = today + timedelta(days=days)
@@ -226,7 +383,7 @@ async def get_popular_festivals(
     
     인증 불필요
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     service = get_festival_service()
     today = datetime.now().date()
@@ -344,3 +501,5 @@ async def get_festival_detail(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"축제 상세 조회 중 오류 발생: {str(e)}"
         )
+    
+    

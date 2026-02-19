@@ -15,7 +15,6 @@ class TourAPIService:
     엔드포인트:
     - /areaBasedList2: 지역기반 관광정보조회
     - /searchKeyword2: 키워드 검색 조회
-    - /searchFestival2: 축제/행사 검색 조회 ★ 추가
     - /detailCommon2: 공통정보조회
     - /detailIntro2: 소개정보조회 (운영시간, 휴무일 등)
     - /detailInfo2: 반복정보조회
@@ -117,7 +116,12 @@ class TourAPIService:
             response.raise_for_status()
             data = response.json()
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        # TourAPI는 결과 없을 때 items를 빈 문자열("")로 반환하므로 반드시 타입 체크
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return []
+
+        items = items_container.get("item", [])
 
         # 단일 항목인 경우 리스트로 변환
         if isinstance(items, dict):
@@ -134,7 +138,7 @@ class TourAPIService:
         num_of_rows: int = 50
     ) -> List[Dict[str, Any]]:
         """
-        축제/행사 검색 ★ 신규 추가
+        축제/행사 검색
 
         Args:
             area_code: 지역 코드 (선택, 없으면 전국)
@@ -154,7 +158,7 @@ class TourAPIService:
             "MobileOS": "ETC",
             "MobileApp": "TravelApp",
             "_type": "json",
-            "listYN": "Y",
+            "listYN": "Y",   # ← 누락되어 있던 파라미터 추가
             "arrange": "A",  # 제목순 정렬
         }
 
@@ -167,18 +171,29 @@ class TourAPIService:
         if event_end_date:
             params["eventEndDate"] = event_end_date
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(endpoint, params=params)
-            response.raise_for_status()
-            data = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(endpoint, params=params)
+                response.raise_for_status()
+                data = response.json()
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            # TourAPI는 결과 없을 때 items를 빈 문자열("")로 반환하므로 반드시 타입 체크
+            # 기존 코드: .get("items", {}).get("item", []) → items가 "" 이면 AttributeError 발생
+            items_container = data.get("response", {}).get("body", {}).get("items") or {}
+            if not isinstance(items_container, dict):
+                return []
 
-        # 단일 항목인 경우 리스트로 변환
-        if isinstance(items, dict):
-            items = [items]
+            items = items_container.get("item", [])
 
-        return items or []
+            # 단일 항목인 경우 리스트로 변환
+            if isinstance(items, dict):
+                items = [items]
+
+            return items or []
+
+        except Exception as e:
+            print(f"ERROR TourAPI search_festivals: {e}")
+            return []
 
     async def get_detail_common(self, content_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -208,7 +223,11 @@ class TourAPIService:
             response.raise_for_status()
             data = response.json()
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return None
+
+        items = items_container.get("item", [])
 
         if isinstance(items, list) and items:
             return items[0]
@@ -240,8 +259,8 @@ class TourAPIService:
                 - usetime: 이용시간
                 - restdate: 휴무일
                 - usefee: 이용요금
-                
-            축제공연행사(15): ★ 추가
+
+            축제공연행사(15):
                 - eventstartdate: 행사 시작일
                 - eventenddate: 행사 종료일
                 - eventplace: 행사 장소
@@ -264,7 +283,11 @@ class TourAPIService:
             response.raise_for_status()
             data = response.json()
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return None
+
+        items = items_container.get("item", [])
 
         if isinstance(items, list) and items:
             return items[0]
@@ -276,14 +299,10 @@ class TourAPIService:
     async def get_full_place_info(
         self,
         content_id: int,
-        content_type_id: int = 12
+        content_type_id: int
     ) -> Dict[str, Any]:
         """
         관광지 전체 정보 조회 (공통 + 소개)
-        
-        Args:
-            content_id: 콘텐츠 ID
-            content_type_id: 콘텐츠 타입 (기본값: 12 - 관광지)
         """
         common, intro = await asyncio.gather(
             self.get_detail_common(content_id),
@@ -300,6 +319,50 @@ class TourAPIService:
             result.update(intro)
 
         return result
+
+    # cat3 소분류 코드 → 한글 태그 매핑
+    CAT3_TAG_MAP = {
+        # 관광지(12) 하위
+        "A01010100": "자연경관", "A01010200": "해변", "A01010300": "산",
+        "A01010400": "호수", "A01010500": "강", "A01010600": "폭포",
+        "A01010700": "해안", "A01010800": "섬", "A01010900": "계곡",
+        "A01011000": "온천", "A01011100": "동굴", "A01011200": "수목원",
+        "A01011300": "공원",
+        "A02010100": "역사유적", "A02010200": "사찰", "A02010300": "고궁",
+        "A02010400": "성", "A02010500": "탑", "A02010600": "전통건축",
+        "A02010700": "마을", "A02010800": "박물관", "A02010900": "기념관",
+        "A02020100": "테마공원", "A02020200": "전시관", "A02020300": "미술관",
+        "A02020400": "공연장", "A02020500": "체험관", "A02020600": "캠핑",
+        "A02020700": "수상레포츠", "A02020800": "레저스포츠",
+        "A02030100": "유원지", "A02030200": "관광지",
+        "A02030300": "거리", "A02030400": "야시장",
+        "A02050100": "전망대", "A02050200": "야경",
+        "A02060100": "카페거리", "A02060200": "벽화마을",
+        # 음식점(39) 하위
+        "A05020100": "한식", "A05020200": "서양식", "A05020300": "일식",
+        "A05020400": "중식", "A05020500": "분식", "A05020600": "카페",
+        "A05020700": "해산물", "A05020800": "고기",
+        "A05020900": "간식",
+    }
+
+    # 설명(overview)에서 키워드 추출용 매핑
+    KEYWORD_TAG_MAP = {
+        "바다": ["바다", "해변", "해수욕", "해안", "파도", "갯벌"],
+        "산": ["산", "등산", "트레킹", "하이킹", "능선", "정상"],
+        "역사": ["역사", "유적", "문화재", "조선", "고려", "백제", "신라", "사적"],
+        "카페": ["카페", "커피", "디저트", "베이커리", "브런치"],
+        "야경": ["야경", "야간", "조명", "밤", "불빛", "라이트업"],
+        "힐링": ["힐링", "휴식", "조용", "평화", "명상", "치유", "여유"],
+        "액티비티": ["체험", "액티비티", "놀이", "레저", "스포츠", "어드벤처"],
+        "전통": ["전통", "한옥", "민속", "공예", "전래"],
+        "자연": ["자연", "생태", "숲", "녹지", "습지", "철새"],
+        "맛집": ["맛집", "미식", "로컬푸드", "향토", "먹거리", "특산"],
+        "포토스팟": ["포토", "인스타", "사진", "경치", "뷰", "전망"],
+        "가족": ["가족", "어린이", "키즈", "놀이터", "체험학습"],
+        "커플": ["데이트", "커플", "로맨틱", "분위기"],
+        "축제": ["축제", "행사", "이벤트", "페스티벌", "공연"],
+        "쇼핑": ["쇼핑", "시장", "상점", "기념품", "특산품"],
+    }
 
     def parse_place_data(
         self,
@@ -335,10 +398,20 @@ class TourAPIService:
             "content_type_id": content_type_id,
         }
 
+        # Tour API 분류 코드 수집
+        result["cat1"] = item.get("cat1")
+        result["cat2"] = item.get("cat2")
+        result["cat3"] = item.get("cat3")
+        result["readcount"] = int(item.get("readcount", 0)) if item.get("readcount") else None
+
         # 상세 정보 병합
         if detail:
             # 설명
             result["description"] = self._clean_html(detail.get("overview", ""))
+
+            # 전화번호, 홈페이지
+            result["tel"] = self._clean_html(detail.get("tel", "")) or None
+            result["homepage"] = self._clean_html(detail.get("homepage", "")) or None
 
             # 운영시간 (콘텐츠 타입별로 다른 필드)
             operating_hours = (
@@ -366,20 +439,54 @@ class TourAPIService:
                 detail.get("parking") or
                 ""
             )
-            # 입장료 정보가 없으면 무료로 추정하지 않음
             result["fee_info"] = self._clean_html(fee_info) if fee_info else None
 
-        # 태그 생성 (카테고리 + 지역)
-        tags = [result["category"]]
-        addr = result.get("address", "")
-        for region in ["서울", "부산", "제주", "강원", "경주", "전주", "여수"]:
-            if region in addr:
-                tags.append(region)
-                break
-
-        result["tags"] = tags
+        # 풍부한 태그 생성
+        result["tags"] = self._generate_rich_tags(result)
 
         return result
+
+    def _generate_rich_tags(self, place_data: Dict[str, Any]) -> List[str]:
+        """
+        풍부한 태그 생성 (5~10개 목표)
+
+        태그 소스:
+        1. 카테고리
+        2. 지역
+        3. cat3 소분류 코드 매핑
+        4. 설명(overview) 키워드 추출
+        """
+        tags = set()
+
+        # 1. 카테고리
+        if place_data.get("category"):
+            tags.add(place_data["category"])
+
+        # 2. 지역
+        addr = place_data.get("address", "")
+        for region in ["서울", "부산", "제주", "강원", "경주", "전주", "여수",
+                        "인천", "대구", "광주", "대전", "울산", "세종",
+                        "속초", "강릉", "춘천", "수원", "통영", "목포"]:
+            if region in addr:
+                tags.add(region)
+                break
+
+        # 3. cat3 소분류 코드 → 한글 태그
+        cat3 = place_data.get("cat3")
+        if cat3 and cat3 in self.CAT3_TAG_MAP:
+            tags.add(self.CAT3_TAG_MAP[cat3])
+
+        # 4. 설명에서 키워드 추출
+        description = place_data.get("description", "")
+        if description:
+            desc_lower = description.lower()
+            for tag_name, keywords in self.KEYWORD_TAG_MAP.items():
+                for kw in keywords:
+                    if kw in desc_lower:
+                        tags.add(tag_name)
+                        break
+
+        return list(tags)
 
     def _clean_html(self, text: str) -> str:
         """HTML 태그 및 불필요한 문자 제거"""
