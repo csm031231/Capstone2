@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float, JSON, Date, Time
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float, JSON, Date, Time, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from core.database import Base
@@ -18,6 +18,7 @@ class User(Base):
     analysis_logs = relationship("AnalysisLog", back_populates="user")
     preference = relationship("UserPreference", back_populates="user", uselist=False, cascade="all, delete-orphan")
     chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+    travel_posts = relationship("TravelPost", back_populates="user", cascade="all, delete-orphan")
 
 # 2. Place Domain (장소/관광지 데이터)
 class Place(Base):
@@ -191,3 +192,93 @@ class ChatSession(Base):
     # 관계 설정
     user = relationship("User", back_populates="chat_sessions")
     trip = relationship("Trip")
+
+
+# 7. Board Domain (여행 후기 게시판)
+class TravelPost(Base):
+    """여행 후기 게시글"""
+    __tablename__ = "travel_posts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    trip_id = Column(Integer, ForeignKey("trips.id"), nullable=True)   # 기존 여행 일정 연결 (선택)
+
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+
+    # 여행 정보
+    region = Column(String, nullable=True)                             # "부산", "제주" 등
+    travel_start_date = Column(Date, nullable=True)                    # 여행 시작일
+    travel_end_date = Column(Date, nullable=True)                      # 여행 종료일
+    tags = Column(JSON, nullable=True)                                 # ["힐링", "맛집", "자연"]
+    thumbnail_url = Column(String, nullable=True)                      # 대표 이미지 URL
+
+    # 통계 캐시 (빠른 목록 조회용)
+    view_count = Column(Integer, default=0)
+    like_count = Column(Integer, default=0)
+    comment_count = Column(Integer, default=0)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # 관계 설정
+    user = relationship("User", back_populates="travel_posts")
+    trip = relationship("Trip")
+    images = relationship("PostImage", back_populates="post", cascade="all, delete-orphan")
+    comments = relationship("PostComment", back_populates="post", cascade="all, delete-orphan")
+    likes = relationship("PostLike", back_populates="post", cascade="all, delete-orphan")
+
+
+class PostImage(Base):
+    """게시글 첨부 이미지"""
+    __tablename__ = "post_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, ForeignKey("travel_posts.id"), nullable=False)
+    image_url = Column(String, nullable=False)
+    order_index = Column(Integer, default=0)                           # 이미지 노출 순서
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 관계 설정
+    post = relationship("TravelPost", back_populates="images")
+
+
+class PostComment(Base):
+    """게시글 댓글 (대댓글 포함)"""
+    __tablename__ = "post_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, ForeignKey("travel_posts.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    parent_id = Column(Integer, ForeignKey("post_comments.id"), nullable=True)  # 대댓글: 부모 댓글 ID
+
+    content = Column(Text, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # 관계 설정
+    post = relationship("TravelPost", back_populates="comments")
+    user = relationship("User")
+    parent = relationship("PostComment", back_populates="replies", remote_side="PostComment.id")
+    replies = relationship("PostComment", back_populates="parent")
+
+
+class PostLike(Base):
+    """게시글 좋아요 (유저당 1회)"""
+    __tablename__ = "post_likes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, ForeignKey("travel_posts.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("post_id", "user_id", name="uq_post_like"),
+    )
+
+    # 관계 설정
+    post = relationship("TravelPost", back_populates="likes")
+    user = relationship("User")
