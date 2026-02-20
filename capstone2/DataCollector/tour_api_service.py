@@ -6,6 +6,11 @@ from datetime import datetime
 from core.config import get_config
 
 
+class TourAPIRateLimitError(Exception):
+    """TourAPI 요청 제한 에러"""
+    pass
+
+
 class TourAPIService:
     """
     한국관광공사 TourAPI 서비스 (v2)
