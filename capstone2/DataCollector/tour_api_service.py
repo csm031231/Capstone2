@@ -61,6 +61,36 @@ class TourAPIService:
     def __init__(self):
         config = get_config()
         self.api_key = config.tour_api_key
+        # 간단한 in-memory TTL 캐시 for detail lookups
+        self._detail_cache: dict = {}
+        self._cache_lock = asyncio.Lock()
+        # 캐시 TTL 초 (기본 6시간)
+        self._detail_cache_ttl = 60 * 60 * 6
+        # 재사용 가능한 Async HTTP 클라이언트 생성 (커넥션 풀 재활용)
+        # limits는 필요 시 환경에 맞게 조정
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+        # 검색 결과 캐시 (간단한 요청 레벨 캐시, 기본 5분)
+        self._search_cache: dict = {}
+        self._search_cache_ttl = 60 * 5
+
+    async def _get_with_fallback(self, endpoint: str, params: dict):
+        """기본 요청 수행. 404 발생 시 KorService2 -> KorService로 재시도."""
+        try:
+            response = await self._client.get(endpoint, params=params)
+        except Exception:
+            raise
+
+        # 404인 경우 'KorService2' 대신 'KorService'로 재시도
+        if response.status_code == 404 and 'KorService2' in endpoint:
+            alt = endpoint.replace('KorService2', 'KorService')
+            print(f"WARN TourAPI: endpoint returned 404, retrying with {alt}")
+            try:
+                response = await self._client.get(alt, params=params)
+            except Exception:
+                raise
+
+        return response
 
     async def search_places(
         self,
@@ -111,10 +141,14 @@ class TourAPIService:
         if content_type_id:
             params["contentTypeId"] = content_type_id
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(endpoint, params=params)
+        t0 = asyncio.get_event_loop().time()
+        try:
+            response = await self._get_with_fallback(endpoint, params)
             response.raise_for_status()
             data = response.json()
+        finally:
+            t1 = asyncio.get_event_loop().time()
+            print(f"DEBUG TourAPI.search_places: elapsed={(t1-t0):.3f}s endpoint={endpoint}")
 
         items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
 
@@ -168,45 +202,65 @@ class TourAPIService:
         print(f"DEBUG TourAPI: 요청 URL = {endpoint}")
         print(f"DEBUG TourAPI: 파라미터 = {params}")
 
+        # 캐시 키 생성
+        import json
+        cache_key = f"searchFestival:{endpoint}:{json.dumps(params, sort_keys=True, ensure_ascii=False)}"
+
+        # 캐시 확인
+        async with self._cache_lock:
+            cached = self._search_cache.get(cache_key)
+            if cached:
+                ts, value = cached
+                import time
+                if time.time() - ts < self._search_cache_ttl:
+                    print("DEBUG TourAPI.search_festivals: cache hit", cache_key)
+                    return value
+                else:
+                    try:
+                        del self._search_cache[cache_key]
+                    except KeyError:
+                        pass
+
+        t0 = asyncio.get_event_loop().time()
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(endpoint, params=params)
-                
-                print(f"DEBUG TourAPI: 응답 상태 = {response.status_code}")
-                
-                response.raise_for_status()
-                data = response.json()
+            response = await self._get_with_fallback(endpoint, params)
+            print(f"DEBUG TourAPI: 응답 상태 = {response.status_code}")
+            response.raise_for_status()
+            data = response.json()
+            print("DEBUG TourAPI: 전체 응답 =", data)
 
-                # 응답 구조 확인 — 전체 응답을 출력하여 API의 실제 반환값을 확인
-                print("DEBUG TourAPI: 전체 응답 =", data)
+            header = data.get("response", {}).get("header", {})
+            result_code = header.get("resultCode") or data.get("resultCode")
+            result_msg = header.get("resultMsg") or data.get("resultMsg")
+            print(f"DEBUG TourAPI: 결과 코드 = {result_code}, 메시지 = {result_msg}")
 
-                # 일부 API는 최상위에 resultCode/resultMsg를, 일부는 response.header에 포함시킴
-                header = data.get("response", {}).get("header", {})
-                result_code = header.get("resultCode") or data.get("resultCode")
-                result_msg = header.get("resultMsg") or data.get("resultMsg")
-                print(f"DEBUG TourAPI: 결과 코드 = {result_code}, 메시지 = {result_msg}")
-
-                # 에러 코드인 경우 파싱 중단
-                # 한국관광공사 API는 성공 코드로 '0000'을 반환하므로 이를 허용하도록 처리
-                if result_code and str(result_code) not in ("00", "0000", "0"):
-                    print(f"ERROR TourAPI: API error {result_code} - {result_msg}")
-                    return []
+            if result_code and str(result_code) not in ("00", "0000", "0"):
+                print(f"ERROR TourAPI: API error {result_code} - {result_msg}")
+                return []
 
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-
-            # 단일 항목인 경우 리스트로 변환
             if isinstance(items, dict):
                 items = [items]
 
             print(f"DEBUG TourAPI: 파싱된 아이템 수 = {len(items) if items else 0}")
 
+            # 결과를 캐시에 저장
+            async with self._cache_lock:
+                import time
+                try:
+                    self._search_cache[cache_key] = (time.time(), items or [])
+                except Exception:
+                    pass
+
             return items or []
-        
         except Exception as e:
             print(f"ERROR TourAPI: {e}")
             import traceback
             traceback.print_exc()
             return []
+        finally:
+            t1 = asyncio.get_event_loop().time()
+            print(f"DEBUG TourAPI.search_festivals: elapsed={(t1-t0):.3f}s")
 
     async def get_detail_common(self, content_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -231,13 +285,22 @@ class TourAPIService:
             "addrinfoYN": "Y",
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(endpoint, params=params)
+        t0 = asyncio.get_event_loop().time()
+        try:
+            response = await self._get_with_fallback(endpoint, params)
             response.raise_for_status()
             data = response.json()
+        finally:
+            t1 = asyncio.get_event_loop().time()
+            print(f"DEBUG TourAPI.get_detail_common: elapsed={(t1-t0):.3f}s contentId={content_id}")
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        # TourAPI는 결과 없을 때 items를 빈 문자열("")로 반환하는 경우가 있어
+        # items 컨테이너를 먼저 안전하게 추출하고 타입을 검사한다.
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return None
 
+        items = items_container.get("item", [])
         if isinstance(items, list) and items:
             return items[0]
         elif isinstance(items, dict):
@@ -279,13 +342,21 @@ class TourAPIService:
             "contentTypeId": content_type_id,
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(endpoint, params=params)
+        t0 = asyncio.get_event_loop().time()
+        try:
+            response = await self._get_with_fallback(endpoint, params)
             response.raise_for_status()
             data = response.json()
+        finally:
+            t1 = asyncio.get_event_loop().time()
+            print(f"DEBUG TourAPI.get_detail_intro: elapsed={(t1-t0):.3f}s contentId={content_id}")
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        # 안전한 items 처리: 빈 문자열 또는 비정상 구조에 대비
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return None
 
+        items = items_container.get("item", [])
         if isinstance(items, list) and items:
             return items[0]
         elif isinstance(items, dict):
@@ -301,6 +372,26 @@ class TourAPIService:
         """
         관광지 전체 정보 조회 (공통 + 소개)
         """
+        # 캐시 키
+        cache_key = f"{content_id}_{content_type_id}"
+
+        # 1) 캐시 확인
+        async with self._cache_lock:
+            cached = self._detail_cache.get(cache_key)
+            if cached:
+                ts, value = cached
+                # 만료 검사
+                import time
+                if time.time() - ts < self._detail_cache_ttl:
+                    return value
+                else:
+                    # 만료된 항목 삭제
+                    try:
+                        del self._detail_cache[cache_key]
+                    except KeyError:
+                        pass
+
+        # 2) 실제 요청 (병렬로 공통/소개 요청 수행)
         common, intro = await asyncio.gather(
             self.get_detail_common(content_id),
             self.get_detail_intro(content_id, content_type_id),
@@ -308,12 +399,20 @@ class TourAPIService:
         )
 
         result = {}
-
         if isinstance(common, dict):
             result.update(common)
 
         if isinstance(intro, dict):
             result.update(intro)
+
+        # 3) 캐시에 저장
+        async with self._cache_lock:
+            import time
+            try:
+                self._detail_cache[cache_key] = (time.time(), result)
+            except Exception:
+                # 캐시 저장 실패는 무시 (메모리 제한 등)
+                pass
 
         return result
 

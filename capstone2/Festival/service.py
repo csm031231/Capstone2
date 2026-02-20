@@ -87,23 +87,31 @@ class FestivalService:
                 print(f"축제 검색 오류: {e}")
                 break
 
-        # 5. 상세 정보 조회 및 변환
+        # 5. 상세 정보 조회 및 변환 (동시성 제한을 둔 병렬 호출)
         festival_infos = []
         today = datetime.now().date()
 
-        for item in festivals[:request.max_items]:
-            try:
-                content_id = int(item.get("contentid", 0))
-                # 상세 정보 조회 (15 = 축제공연행사 타입)
-                detail = await self.tour_api.get_full_place_info(content_id, 15)
-                
-                # FestivalInfo DTO로 변환
-                festival_info = self._parse_festival_data(item, detail, today)
-                festival_infos.append(festival_info)
+        # 동시 요청 제한 (환경에 따라 값 조정 가능)
+        concurrency = 10
+        sem = asyncio.Semaphore(concurrency)
 
-            except Exception as e:
-                print(f"축제 상세 조회 오류 (ID: {item.get('contentid')}): {e}")
-                continue
+        async def _fetch_and_parse(item):
+            async with sem:
+                try:
+                    content_id = int(item.get("contentid", 0))
+                    detail = await self.tour_api.get_full_place_info(content_id, 15)
+                    return self._parse_festival_data(item, detail, today)
+                except Exception as e:
+                    print(f"축제 상세 조회 오류 (ID: {item.get('contentid')}): {e}")
+                    return None
+
+        tasks = [_fetch_and_parse(item) for item in festivals[:request.max_items]]
+        results = []
+        if tasks:
+            # gather는 예외를 그대로 전달할 수 있으므로 각 태스크 내부에서 예외를 처리한다
+            results = await asyncio.gather(*tasks)
+
+        festival_infos = [r for r in results if r]
 
         return {
             "success": True,
