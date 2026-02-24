@@ -89,15 +89,12 @@ class PlannerService:
 
         # 6단계: 시간 제약 적용
         print("[PLANNER] 6단계: 시간 제약 적용 시작")
-        constrained = self.time_service.apply_constraints(
+        constrained, warnings = self.time_service.apply_constraints(
             optimized,
             user_preference,
             request.start_date
         )
         print("[PLANNER] 6단계 완료")
-
-        # 경고 메시지 추출
-        warnings = constrained.pop('_warnings', [])
 
         # 7단계: DB 저장
         print("[PLANNER] 7단계: DB 저장 시작")
@@ -120,7 +117,7 @@ class PlannerService:
         total_days: int
     ) -> List[dict]:
         """후보 장소 수집"""
-        # 필요 장소 수 계산 (여유분 포함)
+        # 필요 장소 수 계산 (여유분 포함, 최대 100개)
         needed = request.max_places_per_day * total_days * 2
 
         # 테마 결정
@@ -133,7 +130,7 @@ class PlannerService:
             region=request.region,
             themes=themes,
             exclude_places=request.exclude_places,
-            top_k=min(needed, 50)
+            top_k=min(needed, 100)
         )
 
         # 추천 실행
@@ -203,7 +200,7 @@ class PlannerService:
     ) -> dict:
         """GPT로 일정 초안 생성"""
         # 장소 정보 문자열화 (must_visit 장소는 무조건 포함되도록)
-        places_info = self._format_places_for_gpt(candidates)
+        places_info = self._format_places_for_gpt(candidates, total_days)
 
         # 선호도 정보
         pref_info = self._format_preference_for_gpt(preference)
@@ -279,14 +276,15 @@ class PlannerService:
         result_text = response.choices[0].message.content
         return self._parse_gpt_response(result_text)
 
-    def _format_places_for_gpt(self, candidates: List[dict]) -> str:
+    def _format_places_for_gpt(self, candidates: List[dict], total_days: int = 1) -> str:
         """GPT용 장소 정보 포맷팅 (must_visit 장소는 잘리지 않도록)"""
         # must_visit 장소를 먼저 포함
         must_visit_places = [c for c in candidates if c.get('must_visit')]
         other_places = [c for c in candidates if not c.get('must_visit')]
 
-        # must_visit 장소는 전부 포함, 나머지는 30개까지
-        max_others = max(30 - len(must_visit_places), 10)
+        # 일수에 비례해 전달 장소 수 결정 (하루 최소 8개, 최대 80개)
+        target = max(total_days * 8, 30)
+        max_others = max(target - len(must_visit_places), 10)
         selected = must_visit_places + other_places[:max_others]
 
         lines = []

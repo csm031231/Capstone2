@@ -196,7 +196,7 @@ async def optimize_route(
 
     # 최적화 실행
     optimizer = get_route_optimizer()
-    optimized = optimizer.optimize(
+    optimized = await optimizer.optimize(
         places_by_day,
         request.start_location,
         request.end_location

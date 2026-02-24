@@ -17,6 +17,7 @@ from Planner.planner_router import router as planner_router
 from Recommend.recommend_router import router as recommend_router
 from DataCollector.collector_router import router as data_router
 from Festival.router import router as festival_router
+from Board.router import router as board_router
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ routers.append(planner_router)
 routers.append(recommend_router)
 routers.append(data_router)
 routers.append(festival_router)
+routers.append(board_router)
 
 # FastAPI 앱 생성
 app = FastAPI(

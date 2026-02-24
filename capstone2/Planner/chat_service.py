@@ -1,6 +1,7 @@
 import json
 import re
 import logging
+import asyncio
 from typing import List, Optional, Dict, Any
 from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,14 +119,16 @@ class ChatService:
         # 새 메시지 추가
         messages.append({"role": "user", "content": request.message})
 
-        # 6. GPT 호출
-        gpt_response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=1000,
-            temperature=0.5
-        )
+        # 6. GPT 호출 (동기 클라이언트를 별도 스레드에서 실행)
+        def _call_gpt():
+            return self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.5
+            )
 
+        gpt_response = await asyncio.to_thread(_call_gpt)
         result_text = gpt_response.choices[0].message.content
         result = self._parse_response(result_text)
 

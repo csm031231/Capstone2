@@ -332,23 +332,27 @@ class RouteOptimizer:
                     travel_time = max(int(duration / 60), 1)  # 초 → 분
                     dist_km = distance / 1000
 
-                    if dist_km < 1:
+                    # 500m 미만: 도보, 500m~5km: 대중교통, 5km 초과: 자동차
+                    if dist_km < 0.5:
                         transport_mode = "walk"
-                    elif dist_km < 3:
-                        transport_mode = "walk"
+                    elif dist_km < 5:
+                        transport_mode = "public_transit"
                     else:
                         transport_mode = "car"
                 else:
                     # 카카오 API 실패: Haversine 폴백
                     dist_km = self._haversine(prev_lat, prev_lng, curr_lat, curr_lng)
 
-                    if dist_km < 1:
-                        travel_time = int(dist_km / 5 * 60)
+                    if dist_km < 0.5:
+                        # 500m 미만: 도보 (분속 80m)
+                        travel_time = max(int(dist_km * 1000 / 80), 5)
                         transport_mode = "walk"
-                    elif dist_km < 3:
-                        travel_time = int(dist_km / 4 * 60)
-                        transport_mode = "walk"
+                    elif dist_km < 5:
+                        # 500m~5km: 대중교통 (평균 20km/h)
+                        travel_time = int(dist_km / 20 * 60) + 5
+                        transport_mode = "public_transit"
                     else:
+                        # 5km 초과: 자동차 (평균 30km/h + 대기 10분)
                         travel_time = int(dist_km / 30 * 60) + 10
                         transport_mode = "car"
 

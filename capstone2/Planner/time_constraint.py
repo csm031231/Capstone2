@@ -45,7 +45,7 @@ class TimeConstraintService:
         places_by_day: Dict[int, List[dict]],
         preference: Optional[UserPreference],
         start_date: date
-    ) -> Dict[int, List[dict]]:
+    ) -> Tuple[Dict[int, List[dict]], List[str]]:
         """
         시간 제약 적용
 
@@ -55,7 +55,7 @@ class TimeConstraintService:
         4. 도착 시간 계산
 
         Returns:
-            places_by_day with warnings list at key '_warnings'
+            (places_by_day, warnings) 튜플
         """
         # 시간 설정
         if preference:
@@ -79,14 +79,17 @@ class TimeConstraintService:
 
             day_itineraries = []
 
-            for place in places:
+            for i, place in enumerate(places):
                 is_must_visit = place.get('must_visit', False)
+                place_name = place.get('place_name') or place.get('name', '알 수 없음')
+
+                # 이동 시간 반영: 이전 장소 체류 종료 후 현재 장소까지의 이동시간을 더함
+                travel_time = place.get('travel_time_from_prev', 0) or 0
+                arrival_time = current_time + timedelta(minutes=travel_time)
 
                 # 휴무일 체크
                 if self._is_closed(place.get('closed_days'), current_date):
                     if is_must_visit:
-                        # 필수 방문지는 경고만 하고 포함
-                        place_name = place.get('place_name') or place.get('name', '알 수 없음')
                         warnings.append(
                             f"{day_num}일차: {place_name}은(는) 휴무일이지만 필수 방문 장소이므로 포함합니다"
                         )
@@ -99,13 +102,12 @@ class TimeConstraintService:
                 )
 
                 # 영업 시작 시간까지 대기
-                if opens and current_time.time() < opens:
-                    current_time = datetime.combine(current_date, opens)
+                if opens and arrival_time.time() < opens:
+                    arrival_time = datetime.combine(current_date, opens)
 
                 # 영업 종료 확인
-                if closes and current_time.time() >= closes:
+                if closes and arrival_time.time() >= closes:
                     if is_must_visit:
-                        place_name = place.get('place_name') or place.get('name', '알 수 없음')
                         warnings.append(
                             f"{day_num}일차: {place_name}은(는) 영업시간이 지났지만 필수 방문 장소이므로 포함합니다"
                         )
@@ -118,10 +120,9 @@ class TimeConstraintService:
                 stay_duration = int(base_duration * pace_config["stay_multiplier"])
 
                 # 종료 시간 확인
-                finish_time = current_time + timedelta(minutes=stay_duration)
+                finish_time = arrival_time + timedelta(minutes=stay_duration)
                 if finish_time > end_datetime:
                     if is_must_visit:
-                        place_name = place.get('place_name') or place.get('name', '알 수 없음')
                         warnings.append(
                             f"{day_num}일차: {place_name} 방문 시 선호 종료 시간을 초과합니다"
                         )
@@ -129,23 +130,16 @@ class TimeConstraintService:
                         break
 
                 # 일정 추가
-                place['suggested_arrival_time'] = current_time.time()
+                place['suggested_arrival_time'] = arrival_time.time()
                 place['suggested_stay_duration'] = stay_duration
                 day_itineraries.append(place)
 
-                # 다음 장소 시간 (체류 + 버퍼)
-                travel_time = place.get('travel_time_from_prev', 0) or 0
-                current_time = finish_time + timedelta(
-                    minutes=pace_config["buffer_time"] + travel_time
-                )
+                # 다음 장소 기준 시간 = 현재 체류 종료 + 버퍼
+                current_time = finish_time + timedelta(minutes=pace_config["buffer_time"])
 
             result[day_num] = day_itineraries
 
-        # 경고를 별도 키에 저장
-        if warnings:
-            result['_warnings'] = warnings
-
-        return result
+        return result, warnings
 
     def validate_schedule(
         self,
