@@ -3,6 +3,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from core.config import get_config
 from core.database import init_db
@@ -21,27 +23,21 @@ from Board.router import router as board_router
 
 logger = logging.getLogger(__name__)
 
-# 초기 수집 대상 지역
-DEFAULT_COLLECT_AREAS = ["부산", "제주", "강원", "서울", "경북"]
-DEFAULT_MAX_PER_AREA = 100
+# 수집 대상 지역 및 설정
+DEFAULT_COLLECT_AREAS = [
+    "서울", "부산", "제주", "강원", "경북",
+    "전남", "경남", "전북", "인천", "경기"
+]
+DEFAULT_MAX_PER_TYPE = 300  # 지역별·타입별 최대 수집 개수
 
 
-async def _seed_places_if_empty():
-    """Place 테이블이 비어있으면 기본 지역 데이터를 자동 수집"""
-    from sqlalchemy import select, func
-    from core.models import Place
+async def _collect_all_areas():
+    """전체 지역 데이터 수집 (신규 장소만 추가, 중복 스킵)"""
     from DataCollector.collector_service import get_collector_service
 
-    async with database.DBSessionLocal() as session:
-        result = await session.execute(select(func.count()).select_from(Place))
-        count = result.scalar() or 0
-
-    if count > 0:
-        logger.info(f"Place 테이블에 이미 {count}개의 데이터가 있습니다. 초기 수집을 건너뜁니다.")
-        return
-
-    logger.info(f"Place 테이블이 비어있습니다. 기본 지역 데이터를 수집합니다: {DEFAULT_COLLECT_AREAS}")
+    logger.info(f"데이터 수집 시작: {DEFAULT_COLLECT_AREAS}")
     collector = get_collector_service()
+    total = 0
 
     for area in DEFAULT_COLLECT_AREAS:
         try:
@@ -49,12 +45,16 @@ async def _seed_places_if_empty():
                 result = await collector.collect_places_by_area(
                     db=session,
                     area_name=area,
-                    max_items=DEFAULT_MAX_PER_AREA,
+                    max_items_per_type=DEFAULT_MAX_PER_TYPE,
                     enhance_with_wiki=True
                 )
-                logger.info(f"  [{area}] 수집 완료: {result.get('collected', 0)}개")
+                collected = result.get("collected", 0)
+                total += collected
+                logger.info(f"  [{area}] 완료 - 신규: {collected}개, 스킵: {result.get('skipped', 0)}개")
         except Exception as e:
             logger.error(f"  [{area}] 수집 실패: {e}")
+
+    logger.info(f"데이터 수집 완료. 총 신규 {total}개 추가됨.")
 
 
 @asynccontextmanager
@@ -62,13 +62,28 @@ async def lifespan(app: FastAPI):
     config = get_config()
     init_db(config)
 
-    # Place 테이블이 비어있으면 자동 수집
+    # 서버 시작 시 데이터 수집 (비어있으면 전체, 있으면 신규만)
     try:
-        await _seed_places_if_empty()
+        await _collect_all_areas()
     except Exception as e:
         logger.error(f"초기 데이터 수집 중 오류 (서버는 정상 시작됩니다): {e}")
 
+    # 매일 새벽 3시 자동 갱신 스케줄러
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        _collect_all_areas,
+        trigger=CronTrigger(hour=3, minute=0),
+        id="daily_data_refresh",
+        name="일간 장소 데이터 갱신",
+        misfire_grace_time=3600
+    )
+    scheduler.start()
+    logger.info("스케줄러 시작: 매일 03:00 자동 데이터 갱신")
+
     yield
+
+    scheduler.shutdown()
+    logger.info("스케줄러 종료")
 
 # 라우터 리스트
 routers = []

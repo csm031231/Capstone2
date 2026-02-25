@@ -24,7 +24,7 @@ class DataCollectorService:
         db: AsyncSession,
         area_name: str,
         content_types: Optional[List[str]] = None,
-        max_items: int = 100,
+        max_items_per_type: int = 300,
         enhance_with_wiki: bool = True
     ) -> Dict[str, Any]:
         """
@@ -33,8 +33,8 @@ class DataCollectorService:
         Args:
             db: DB 세션
             area_name: 지역명 (서울, 부산, 제주 등)
-            content_types: 수집할 콘텐츠 타입 (없으면 전체)
-            max_items: 최대 수집 개수
+            content_types: 수집할 콘텐츠 타입 (없으면 전체: 관광지+문화시설+음식점)
+            max_items_per_type: 타입별 최대 수집 개수 (공유 카운터 아님)
             enhance_with_wiki: Wikipedia로 설명 보강 여부
 
         Returns:
@@ -60,14 +60,19 @@ class DataCollectorService:
             # 기본: 관광지, 문화시설, 음식점
             type_ids = [12, 14, 39]
 
-        collected = 0
-        skipped = 0
+        total_collected = 0
+        total_skipped = 0
         errors = []
+        by_type: Dict[str, int] = {}
+
+        # 타입별로 독립적인 카운터 사용 → 각 타입이 고르게 수집됨
+        type_name_map = {v: k for k, v in self.tour_api.CONTENT_TYPE.items()}
 
         for content_type_id in type_ids:
-            # 페이지별로 데이터 수집
+            type_collected = 0
             page = 1
-            while collected < max_items:
+
+            while type_collected < max_items_per_type:
                 try:
                     items = await self.tour_api.search_places(
                         area_code=area_code,
@@ -80,7 +85,7 @@ class DataCollectorService:
                         break
 
                     for item in items:
-                        if collected >= max_items:
+                        if type_collected >= max_items_per_type:
                             break
 
                         result = await self._process_and_save_place(
@@ -88,9 +93,10 @@ class DataCollectorService:
                         )
 
                         if result == "created":
-                            collected += 1
+                            type_collected += 1
+                            total_collected += 1
                         elif result == "exists":
-                            skipped += 1
+                            total_skipped += 1
                         else:
                             errors.append(item.get("title", "Unknown"))
 
@@ -100,14 +106,18 @@ class DataCollectorService:
                     await asyncio.sleep(0.3)
 
                 except Exception as e:
-                    errors.append(f"Page {page}: {str(e)}")
+                    errors.append(f"[{type_name_map.get(content_type_id, content_type_id)}] Page {page}: {str(e)}")
                     break
+
+            type_name = type_name_map.get(content_type_id, str(content_type_id))
+            by_type[type_name] = type_collected
 
         return {
             "success": True,
             "area": area_name,
-            "collected": collected,
-            "skipped": skipped,
+            "collected": total_collected,
+            "skipped": total_skipped,
+            "by_type": by_type,
             "errors": len(errors),
             "error_details": errors[:10] if errors else []
         }

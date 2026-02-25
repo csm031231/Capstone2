@@ -119,7 +119,7 @@ class ChatService:
         # 새 메시지 추가
         messages.append({"role": "user", "content": request.message})
 
-        # 6. GPT 호출 (동기 클라이언트를 별도 스레드에서 실행)
+        # 6. GPT 호출 (파싱 실패 시 최대 2회 재시도)
         def _call_gpt():
             return self.client.chat.completions.create(
                 model="gpt-4o",
@@ -128,9 +128,24 @@ class ChatService:
                 temperature=0.5
             )
 
-        gpt_response = await asyncio.to_thread(_call_gpt)
-        result_text = gpt_response.choices[0].message.content
-        result = self._parse_response(result_text)
+        result = None
+        for attempt in range(3):
+            gpt_response = await asyncio.to_thread(_call_gpt)
+            result_text = gpt_response.choices[0].message.content
+            parsed = self._parse_response(result_text)
+            # _parse_response는 실패 시 fallback dict를 반환하므로 action_type으로 판별
+            if parsed.get("action_type"):
+                result = parsed
+                break
+            logger.warning(f"채팅 GPT 응답 파싱 불완전 (시도 {attempt + 1}/3)")
+
+        if result is None:
+            result = {
+                "understood": False,
+                "action_type": "question",
+                "response_message": "요청을 이해하지 못했어요. 다시 한 번 말씀해 주시겠어요?",
+                "needs_confirmation": False
+            }
 
         # 7. 변경 사항 적용 (확인 불필요한 경우)
         changes_made = None
@@ -481,30 +496,52 @@ class ChatService:
         return None
 
     async def _apply_reorder(self, db, trip, change) -> Optional[dict]:
-        """순서 변경 (기존 일정 내 장소에서 검색)"""
+        """순서 변경 후 같은 날 전체 order_index 재정렬"""
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
         if not target:
             return None
 
-        new_day = change.get("day_number")
+        new_day = change.get("day_number") or target.day_number
         new_order = change.get("new_order")
 
-        from Trip.dto import ItineraryUpdate
-        update_data = {}
-        if new_day is not None:
-            update_data["day_number"] = new_day
-        if new_order is not None:
-            update_data["order_index"] = new_order
+        if new_order is None:
+            return None
 
-        if update_data:
-            await trip_crud.update_itinerary(
-                db, target.id,
-                ItineraryUpdate(**update_data)
-            )
-            return {"action": "reorder", "place_name": target.place.name, **update_data}
-        return None
+        from Trip.dto import ItineraryUpdate
+
+        # 대상 장소를 먼저 원하는 day/order로 이동
+        await trip_crud.update_itinerary(
+            db, target.id,
+            ItineraryUpdate(day_number=new_day, order_index=new_order)
+        )
+
+        # 같은 날의 나머지 장소들을 충돌 없이 재정렬
+        same_day = sorted(
+            [it for it in trip.itineraries if it.day_number == new_day],
+            key=lambda x: (x.order_index, x.id)
+        )
+
+        # 대상 장소를 원하는 위치에 끼워넣고 나머지를 순서대로 밀어냄
+        others = [it for it in same_day if it.id != target.id]
+        # new_order 위치에 target을 삽입
+        insert_at = max(0, min(new_order - 1, len(others)))
+        ordered = others[:insert_at] + [target] + others[insert_at:]
+
+        for idx, it in enumerate(ordered, start=1):
+            if it.order_index != idx:
+                await trip_crud.update_itinerary(
+                    db, it.id,
+                    ItineraryUpdate(order_index=idx)
+                )
+
+        return {
+            "action": "reorder",
+            "place_name": target.place.name,
+            "day_number": new_day,
+            "order_index": new_order
+        }
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
         """시간/메모 수정"""

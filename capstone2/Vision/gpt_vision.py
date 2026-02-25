@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -51,25 +52,28 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
     media_type = "image/jpeg" if ext in ["jpg", "jpeg"] else f"image/{ext}"
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": VISION_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{media_type};base64,{base64_image}",
-                                "detail": "high"
+        def _call_gpt():
+            return client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_PROMPT},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{base64_image}",
+                                    "detail": "high"
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=500
-        )
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+
+        response = await asyncio.to_thread(_call_gpt)
 
         result_text = response.choices[0].message.content
 

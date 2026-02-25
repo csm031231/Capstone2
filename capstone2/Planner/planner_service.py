@@ -198,7 +198,7 @@ class PlannerService:
         preference: Optional[UserPreference],
         total_days: int
     ) -> dict:
-        """GPT로 일정 초안 생성"""
+        """GPT로 일정 초안 생성 (파싱 실패 시 최대 2회 재시도)"""
         # 장소 정보 문자열화 (must_visit 장소는 무조건 포함되도록)
         places_info = self._format_places_for_gpt(candidates, total_days)
 
@@ -256,7 +256,6 @@ class PlannerService:
   }}
 }}"""
 
-        # 동기 OpenAI 호출을 별도 스레드에서 실행 (async 이벤트 루프 블로킹 방지)
         def _call_gpt():
             return self.client.chat.completions.create(
                 model="gpt-4o",
@@ -271,10 +270,17 @@ class PlannerService:
                 temperature=0.7
             )
 
-        response = await asyncio.to_thread(_call_gpt)
+        last_error = None
+        for attempt in range(3):
+            response = await asyncio.to_thread(_call_gpt)
+            result_text = response.choices[0].message.content
+            try:
+                return self._parse_gpt_response(result_text)
+            except ValueError as e:
+                last_error = e
+                logger.warning(f"GPT 응답 파싱 실패 (시도 {attempt + 1}/3): {e}")
 
-        result_text = response.choices[0].message.content
-        return self._parse_gpt_response(result_text)
+        raise ValueError(f"GPT 응답을 3회 시도 후에도 파싱할 수 없습니다: {last_error}")
 
     def _format_places_for_gpt(self, candidates: List[dict], total_days: int = 1) -> str:
         """GPT용 장소 정보 포맷팅 (must_visit 장소는 잘리지 않도록)"""

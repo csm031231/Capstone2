@@ -27,9 +27,12 @@ class CollectByAreaRequest(BaseModel):
     area_name: str = Field(..., description="지역명 (서울, 부산, 제주 등)")
     content_types: Optional[List[str]] = Field(
         None,
-        description="수집할 타입 (관광지, 문화시설, 맛집 등)"
+        description="수집할 타입 (관광지, 문화시설, 음식점 등). 미지정 시 관광지+문화시설+음식점"
     )
-    max_items: int = Field(default=100, ge=10, le=500)
+    max_items_per_type: int = Field(
+        default=300, ge=10, le=1000,
+        description="타입별 최대 수집 개수 (타입마다 독립 적용)"
+    )
     enhance_with_wiki: bool = Field(default=True, description="Wikipedia로 설명 보강")
 
 
@@ -89,7 +92,7 @@ async def collect_by_area(
         db=db,
         area_name=request.area_name,
         content_types=request.content_types,
-        max_items=request.max_items,
+        max_items_per_type=request.max_items_per_type,
         enhance_with_wiki=request.enhance_with_wiki
     )
 
@@ -120,27 +123,40 @@ async def collect_by_keyword(
     return result
 
 
+class CollectBulkRequest(BaseModel):
+    """여러 지역 일괄 수집 요청"""
+    areas: List[str] = Field(
+        default=["서울", "부산", "제주", "강원", "경북", "전남", "경남", "전북", "인천", "경기"],
+        description="수집할 지역 목록"
+    )
+    max_items_per_type: int = Field(
+        default=300, ge=10, le=1000,
+        description="지역별·타입별 최대 수집 개수"
+    )
+    enhance_with_wiki: bool = Field(default=True)
+
+
 @router.post("/collect/bulk")
 async def collect_bulk(
-    areas: List[str] = ["부산", "제주", "강원", "경북"],
-    max_per_area: int = 100,
+    request: CollectBulkRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(provide_session)
 ):
     """
     여러 지역 일괄 수집
 
-    기본: 부산, 제주, 강원, 경주
+    기본 10개 지역: 서울, 부산, 제주, 강원, 경북, 전남, 경남, 전북, 인천, 경기
+    각 지역마다 관광지/문화시설/음식점을 타입별 독립 카운터로 수집
     """
     collector = get_collector_service()
     results = []
 
-    for area in areas:
+    for area in request.areas:
         result = await collector.collect_places_by_area(
             db=db,
             area_name=area,
-            max_items=max_per_area,
-            enhance_with_wiki=True
+            max_items_per_type=request.max_items_per_type,
+            enhance_with_wiki=request.enhance_with_wiki
         )
         results.append(result)
 
