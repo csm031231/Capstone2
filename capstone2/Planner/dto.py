@@ -98,6 +98,44 @@ class GenerateResponse(BaseModel):
     generation_method: str = "ai"
 
 
+# ==================== 사진 기반 일정 생성 DTOs ====================
+
+class GenerateWithPhotoRequest(BaseModel):
+    """사진 분석 결과를 포함한 일정 생성 요청"""
+    # 기본 여행 정보
+    title: str = Field(..., min_length=1, max_length=100)
+    region: str = Field(..., description="희망 여행 지역")
+    start_date: date
+    end_date: date
+    must_visit_places: List[int] = []
+    exclude_places: List[int] = []
+    themes: List[str] = []
+    max_places_per_day: int = Field(default=5, ge=2, le=10)
+    start_location: Optional[Dict[str, float]] = None
+    end_location: Optional[Dict[str, float]] = None
+
+    # 사진 분석 결과 (vision/analyze 응답값)
+    photo_city: Optional[str] = Field(None, description="사진에서 감지된 도시")
+    photo_landmark: Optional[str] = Field(None, description="사진에서 감지된 랜드마크")
+    photo_scene_types: List[str] = Field(default=[], description="사진 scene_type 배열")
+
+    # 지역 불일치 확인 후 프론트에서 다시 보낼 때
+    use_photo_themes: bool = Field(
+        default=False,
+        description="사진 분위기 테마를 여행에 반영할지 (불일치 시 확인 후 True로 재요청)"
+    )
+
+
+class GenerateWithPhotoResponse(BaseModel):
+    """사진 기반 일정 생성 응답 (확인 필요 or 바로 생성)"""
+    needs_clarification: bool = False
+    clarification_message: Optional[str] = Field(None, description="지역 불일치 시 확인 메시지")
+    photo_info: Optional[Dict[str, Any]] = Field(None, description="감지된 사진 정보")
+    suggested_themes: Optional[List[str]] = Field(None, description="사진에서 추출한 추천 테마")
+    # 일정이 생성된 경우
+    trip_data: Optional[GenerateResponse] = None
+
+
 # ==================== 채팅 DTOs ====================
 
 class ChatMessage(BaseModel):

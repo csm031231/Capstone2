@@ -1,4 +1,5 @@
 import traceback
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,7 @@ from Recommend.preference_service import get_user_preference
 
 from Planner.dto import (
     GenerateRequest, GenerateResponse,
+    GenerateWithPhotoRequest, GenerateWithPhotoResponse,
     ChatRequest, ChatResponse, ChatHistoryResponse, ChatMessage,
     OptimizeRequest
 )
@@ -78,6 +80,161 @@ async def generate_itinerary(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"일정 생성 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+# ==================== 사진 기반 일정 생성 API ====================
+
+# scene_type → 한국어 테마 매핑
+SCENE_TO_THEME = {
+    "city": "도시여행", "urban": "도시여행",
+    "historical": "역사", "heritage": "역사", "temple": "역사",
+    "nature": "자연", "mountain": "자연", "forest": "자연",
+    "beach": "해변", "ocean": "해변", "sea": "해변",
+    "night": "야경", "nightlife": "야경",
+    "culture": "문화", "art": "문화", "museum": "문화",
+    "food": "맛집", "restaurant": "맛집",
+    "shopping": "쇼핑",
+    "rural": "전통", "village": "전통",
+    "theme_park": "테마파크", "amusement": "테마파크",
+}
+
+# 지역명 정규화 (영문/한문 → 대표 한국어)
+REGION_ALIASES = {
+    "서울": ["seoul", "서울", "서울특별시"],
+    "부산": ["busan", "부산", "부산광역시"],
+    "제주": ["jeju", "제주도", "제주특별자치도"],
+    "강원": ["gangwon", "강원", "강원도"],
+    "경기": ["gyeonggi", "경기", "경기도"],
+    "인천": ["incheon", "인천", "인천광역시"],
+    "대구": ["daegu", "대구", "대구광역시"],
+    "광주": ["gwangju", "광주", "광주광역시"],
+    "대전": ["daejeon", "대전", "대전광역시"],
+    "경북": ["gyeongbuk", "경북", "경상북도"],
+    "경남": ["gyeongnam", "경남", "경상남도"],
+    "전북": ["jeonbuk", "전북", "전라북도"],
+    "전남": ["jeonnam", "전남", "전라남도"],
+}
+
+
+def _normalize_region(name: str) -> Optional[str]:
+    """도시/지역명을 대표 한국어 지역명으로 정규화"""
+    if not name:
+        return None
+    name_lower = name.lower().strip()
+    for key, aliases in REGION_ALIASES.items():
+        if any(alias.lower() in name_lower or name_lower in alias.lower() for alias in aliases):
+            return key
+    return None
+
+
+def _regions_match(photo_city: str, trip_region: str) -> bool:
+    """사진 도시와 여행 지역이 같은 지역인지 확인"""
+    photo_norm = _normalize_region(photo_city)
+    trip_norm = _normalize_region(trip_region)
+    if photo_norm and trip_norm:
+        return photo_norm == trip_norm
+    # 정규화 실패 시 단순 포함 여부
+    return photo_city.lower() in trip_region.lower() or trip_region.lower() in photo_city.lower()
+
+
+def _extract_themes_from_scene(scene_types: List[str]) -> List[str]:
+    """scene_type 배열에서 한국어 테마 추출"""
+    themes = []
+    for s in scene_types:
+        theme = SCENE_TO_THEME.get(s.lower())
+        if theme and theme not in themes:
+            themes.append(theme)
+    return themes
+
+
+@router.post("/generate-with-photo", response_model=GenerateWithPhotoResponse)
+async def generate_with_photo(
+    request: GenerateWithPhotoRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    사진 분석 결과를 반영한 AI 일정 생성
+
+    1. 사진 지역 vs 희망 여행 지역 비교
+    2. 불일치 시 → 확인 메시지 반환 (needs_clarification=true)
+    3. 확인 후 use_photo_themes=true로 재요청 → 사진 분위기를 테마에 반영하여 일정 생성
+
+    프론트 사용 흐름:
+    - 1차: use_photo_themes=false → needs_clarification 확인
+    - 2차: use_photo_themes=true → 실제 일정 생성
+    """
+    if request.end_date < request.start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="종료일은 시작일보다 이후여야 합니다"
+        )
+
+    # 사진 정보가 있고, 지역 불일치이고, 아직 확인 전인 경우
+    if (
+        request.photo_city
+        and not request.use_photo_themes
+        and not _regions_match(request.photo_city, request.region)
+    ):
+        photo_label = request.photo_landmark or request.photo_city
+        suggested_themes = _extract_themes_from_scene(request.photo_scene_types)
+
+        return GenerateWithPhotoResponse(
+            needs_clarification=True,
+            clarification_message=(
+                f"사진은 {photo_label}으로 추정되는데, "
+                f"{request.region} 여행을 원하시는군요! "
+                f"사진의 분위기({', '.join(request.photo_scene_types) if request.photo_scene_types else '분석됨'})를 "
+                f"{request.region} 일정 테마에 반영할까요?"
+            ),
+            photo_info={
+                "city": request.photo_city,
+                "landmark": request.photo_landmark,
+                "scene_types": request.photo_scene_types,
+            },
+            suggested_themes=suggested_themes,
+        )
+
+    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    merged_themes = list(request.themes)
+    if request.use_photo_themes and request.photo_scene_types:
+        photo_themes = _extract_themes_from_scene(request.photo_scene_types)
+        for t in photo_themes:
+            if t not in merged_themes:
+                merged_themes.append(t)
+
+    # 기존 GenerateRequest로 변환하여 일정 생성
+    generate_request = GenerateRequest(
+        title=request.title,
+        region=request.region,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        must_visit_places=request.must_visit_places,
+        exclude_places=request.exclude_places,
+        themes=merged_themes,
+        max_places_per_day=request.max_places_per_day,
+        start_location=request.start_location,
+        end_location=request.end_location,
+    )
+
+    preference = await get_user_preference(db, current_user.id)
+    planner = get_planner_service()
+
+    try:
+        trip_data = await planner.generate_itinerary(
+            db, current_user.id, generate_request, preference
+        )
+        return GenerateWithPhotoResponse(
+            needs_clarification=False,
+            trip_data=trip_data,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"일정 생성 중 오류: {str(e)}"
         )
 
 
