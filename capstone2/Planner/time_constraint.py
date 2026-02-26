@@ -127,7 +127,7 @@ class TimeConstraintService:
                             f"{day_num}일차: {place_name} 방문 시 선호 종료 시간을 초과합니다"
                         )
                     else:
-                        break
+                        continue  # break → continue: 해당 장소만 스킵, 이후 장소 계속 확인
 
                 # 일정 추가
                 place['suggested_arrival_time'] = arrival_time.time()

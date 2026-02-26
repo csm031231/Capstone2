@@ -100,8 +100,9 @@ class ChatService:
         # 3. 현재 일정 컨텍스트 구성
         itinerary_context = self._format_itineraries(trip.itineraries)
 
-        # 4. 추가 가능한 장소 목록
-        available_places = await self._get_available_places(db, trip)
+        # 4. 요청 내용 기반으로 관련 장소 필터링
+        hints = self._extract_query_hints(request.message)
+        available_places = await self._get_places_by_hints(db, trip, hints)
         places_context = self._format_available_places(available_places)
 
         # 5. 대화 히스토리 구성
@@ -150,22 +151,26 @@ class ChatService:
         # 7. 변경 사항 적용 (확인 불필요한 경우)
         changes_made = None
         updated_trip = None
+        response_message = result.get("response_message", "요청을 처리했습니다.")
 
         if not result.get("needs_confirmation") and result.get("action_type") != "question":
             changes_made, updated_trip = await self._apply_changes(
                 db, user_id, trip, result.get("changes", []), available_places
             )
+            # 변경 요청은 했는데 실제로 적용된 게 없으면 사용자에게 알림
+            if result.get("changes") and not changes_made:
+                response_message = "요청하신 장소를 현재 목록에서 찾을 수 없어 변경하지 못했어요. 다른 장소명으로 다시 시도해 주세요."
 
         # 8. 세션 업데이트
         await self._update_session(
             db, session,
             request.message,
-            result.get("response_message", "처리되었습니다.")
+            response_message
         )
 
         return ChatResponse(
             session_id=session.id,
-            response=result.get("response_message", "요청을 처리했습니다."),
+            response=response_message,
             changes_made=[
                 ChangeItem(action=c["action"], details=c)
                 for c in (changes_made or [])
@@ -244,27 +249,84 @@ class ChatService:
 
         return '\n'.join(lines)
 
-    async def _get_available_places(
+    def _extract_query_hints(self, message: str) -> dict:
+        """사용자 메시지에서 카테고리 힌트 추출 (GPT 없이 키워드 매칭)"""
+        CATEGORY_MAP = {
+            "카페": ["카페", "커피", "디저트", "베이커리", "브런치"],
+            "맛집": ["맛집", "식당", "음식", "밥", "점심", "저녁", "먹을", "레스토랑",
+                    "고기", "해산물", "국밥", "냉면", "분식", "피자", "치킨"],
+            "관광지": ["관광지", "명소", "관광", "여행지", "볼거리", "경치", "뷰"],
+            "문화시설": ["박물관", "미술관", "전시", "문화", "공연", "갤러리", "역사"],
+            "자연": ["공원", "산", "바다", "해변", "해수욕장", "자연", "트레킹", "등산", "숲"],
+            "쇼핑": ["쇼핑", "마트", "시장", "백화점", "쇼핑몰", "면세점"],
+            "체험": ["체험", "액티비티", "놀이", "테마파크", "워터파크"],
+        }
+
+        found = []
+        for cat, keywords in CATEGORY_MAP.items():
+            if any(kw in message for kw in keywords):
+                found.append(cat)
+
+        return {"categories": found}
+
+    async def _get_places_by_hints(
         self,
         db: AsyncSession,
-        trip: Trip
+        trip: Trip,
+        hints: dict
     ) -> List[Place]:
-        """추가 가능한 장소 조회 (기존 일정 장소도 포함 - reorder용)"""
-        query = select(Place)
-        if trip.region:
-            query = query.where(Place.address.contains(trip.region))
+        """요청 힌트 기반으로 관련 장소 인기순 조회"""
+        from sqlalchemy import nulls_last
 
-        query = query.limit(50)
-        result = await db.execute(query)
-        return result.scalars().all()
+        categories = hints.get("categories", [])
+        collected: List[Place] = []
+        seen_ids: set = set()
+
+        # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 30개)
+        if categories:
+            for cat in categories:
+                query = select(Place)
+                if trip.region:
+                    query = query.where(Place.address.contains(trip.region))
+                query = (
+                    query
+                    .where(Place.category == cat)
+                    .order_by(nulls_last(Place.readcount.desc()))
+                    .limit(30)
+                )
+                result = await db.execute(query)
+                for p in result.scalars().all():
+                    if p.id not in seen_ids:
+                        collected.append(p)
+                        seen_ids.add(p.id)
+
+        # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 100개)
+        if len(collected) < 50:
+            query = select(Place)
+            if trip.region:
+                query = query.where(Place.address.contains(trip.region))
+            query = (
+                query
+                .order_by(nulls_last(Place.readcount.desc()))
+                .limit(100)
+            )
+            result = await db.execute(query)
+            for p in result.scalars().all():
+                if p.id not in seen_ids:
+                    collected.append(p)
+                    seen_ids.add(p.id)
+                if len(collected) >= 100:
+                    break
+
+        return collected
 
     def _format_available_places(self, places: List[Place]) -> str:
-        """추가 가능한 장소 포맷팅"""
+        """추가 가능한 장소 포맷팅 (최대 50개 GPT 전달)"""
         if not places:
             return "추가 가능한 장소가 없습니다."
 
         lines = []
-        for p in places[:20]:
+        for p in places[:50]:
             tags = ', '.join(p.tags[:2]) if p.tags else ''
             lines.append(f"- {p.name} ({p.category}) [ID: {p.id}] {tags}")
 
