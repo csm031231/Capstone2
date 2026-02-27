@@ -1,0 +1,23 @@
+[18:59:23] 데이터 보완 스크립트 시작
+[18:59:23] 시작 시각: 2026-02-27 18:59:23
+Connecting to DB at p2t.clgc2eqm2oxu.ap-northeast-2.rds.amazonaws.com...
+Database connection initialized successfully.
+[18:59:23] DB 연결 완료
+
+[18:59:24] ==================================================
+[18:59:24] STEP 1: 음식점 데이터 수집 시작
+[18:59:24] ==================================================
+WARN TourAPI: 429 rate limit, waiting 5s (retry 1/5)
+WARN TourAPI: 429 rate limit, waiting 10s (retry 2/5)
+WARN TourAPI: 429 rate limit, waiting 20s (retry 3/5)
+WARN TourAPI: 429 rate limit, waiting 40s (retry 4/5)
+WARN TourAPI: 429 rate limit, waiting 80s (retry 5/5)
+DEBUG TourAPI.search_places: elapsed=155.328s endpoint=https://apis.data.go.kr/B551011/KorService2/areaBasedList2
+[19:01:59]   [서울] 음식점 신규: 0개, 스킵: 0개
+WARN TourAPI: 429 rate limit, waiting 5s (retry 1/5)
+WARN TourAPI: 429 rate limit, waiting 10s (retry 2/5)
+WARN TourAPI: 429 rate limit, waiting 20s (retry 3/5)
+WARN TourAPI: 429 rate limit, waiting 40s (retry 4/5)
+WARN TourAPI: 429 rate limit, waiting 80s (retry 5/5)
+DEBUG TourAPI.search_places: elapsed=155.218s endpoint=https://apis.data.go.kr/B551011/KorService2/areaBasedList2
+[19:04:36]   [부산] 음식점 신규: 0개, 스킵: 0개

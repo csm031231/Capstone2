@@ -78,12 +78,21 @@ class TourAPIService:
         self._search_cache: dict = {}
         self._search_cache_ttl = 60 * 5
 
-    async def _get_with_fallback(self, endpoint: str, params: dict):
-        """기본 요청 수행. 404 발생 시 KorService2 -> KorService로 재시도."""
+    async def _get_with_fallback(self, endpoint: str, params: dict, _retry: int = 0):
+        """기본 요청 수행. 404→KorService 재시도, 429→지수 백오프 재시도."""
         try:
             response = await self._client.get(endpoint, params=params)
         except Exception:
             raise
+
+        # 429 Too Many Requests → 지수 백오프 후 재시도 (최대 5회)
+        if response.status_code == 429:
+            if _retry >= 5:
+                response.raise_for_status()
+            wait_sec = int(response.headers.get("Retry-After", 0)) or (2 ** _retry * 5)
+            print(f"WARN TourAPI: 429 rate limit, waiting {wait_sec}s (retry {_retry+1}/5)")
+            await asyncio.sleep(wait_sec)
+            return await self._get_with_fallback(endpoint, params, _retry + 1)
 
         # 404인 경우 'KorService2' 대신 'KorService'로 재시도
         if response.status_code == 404 and 'KorService2' in endpoint:
