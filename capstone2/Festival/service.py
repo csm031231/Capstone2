@@ -15,8 +15,12 @@ class FestivalService:
     TourAPI를 통해 정보를 조회하고, 필요 시 앱 내 DB(Place)에 저장합니다.
     """
 
+    _CACHE_TTL = 3600  # 캘린더 캐시 유효 시간 (초) - 1시간
+
     def __init__(self):
         self.tour_api = get_tour_api_service()
+        self._calendar_cache: Dict[tuple, Dict] = {}       # 캐시 데이터
+        self._calendar_cache_time: Dict[tuple, datetime] = {}  # 캐시 저장 시각
 
     # ==================== 1. 축제 조회 및 검색 로직 ====================
 
@@ -158,6 +162,17 @@ class FestivalService:
         from calendar import monthrange
         last_day = monthrange(year, month)[1]
 
+        # 캐시 확인
+        cache_key = (year, month, region, max_duration_days)
+        now = datetime.now()
+        if cache_key in self._calendar_cache:
+            elapsed = (now - self._calendar_cache_time[cache_key]).total_seconds()
+            if elapsed < self._CACHE_TTL:
+                print(f"[FestivalCache] HIT ({year}/{month}, region={region}) - {int(elapsed)}초 경과")
+                return self._calendar_cache[cache_key]
+            else:
+                print(f"[FestivalCache] EXPIRED ({year}/{month}, region={region})")
+
         month_start = date(year, month, 1)
         month_end = date(year, month, last_day)
 
@@ -232,7 +247,7 @@ class FestivalService:
                 excluded_count += 1
                 continue
 
-        return {
+        response = {
             "success": True,
             "year": year,
             "month": month,
@@ -244,6 +259,13 @@ class FestivalService:
                 "region": region
             }
         }
+
+        # 캐시 저장
+        self._calendar_cache[cache_key] = response
+        self._calendar_cache_time[cache_key] = now
+        print(f"[FestivalCache] STORED ({year}/{month}, region={region}) - TTL {self._CACHE_TTL}초")
+
+        return response
 
     async def get_calendar_summary(
         self,

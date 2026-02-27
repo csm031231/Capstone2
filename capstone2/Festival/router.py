@@ -350,6 +350,22 @@ async def get_upcoming_festivals(
         )
 
 
+@router.delete("/calendar/cache")
+async def clear_festival_calendar_cache():
+    """
+    캘린더 캐시 수동 초기화
+
+    데이터 갱신 후 즉시 반영이 필요할 때 사용 (TTL 기다리지 않고 강제 삭제)
+
+    인증 불필요
+    """
+    service = get_festival_service()
+    count = len(service._calendar_cache)
+    service._calendar_cache.clear()
+    service._calendar_cache_time.clear()
+    return {"success": True, "message": f"캘린더 캐시 {count}건 삭제됨"}
+
+
 @router.get("/regions")
 async def get_available_regions():
     """
