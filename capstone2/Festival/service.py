@@ -23,7 +23,8 @@ class FestivalService:
     async def search_festivals(
         self,
         db: AsyncSession,
-        request: FestivalSearchRequest
+        request: FestivalSearchRequest,
+        fetch_detail: bool = True
     ) -> Dict[str, Any]:
         """축제 검색 메인 로직"""
         print("DEBUG Festival: search request =", request.dict())
@@ -88,32 +89,41 @@ class FestivalService:
                 break
 
         # 5. 상세 정보 조회 및 변환
-        # - 병렬 호출로 속도 확보 (문서 2)
-        # - 404 등 상세 API 오류 시 목록 데이터만으로 파싱 (문서 1 fallback)
         today = datetime.now().date()
-        concurrency = 10
-        sem = asyncio.Semaphore(concurrency)
 
-        async def _fetch_and_parse(item):
-            async with sem:
-                content_id = int(item.get("contentid", 0))
-                detail = None
+        if fetch_detail:
+            # 상세 API 병렬 호출 (검색/상세 조회용)
+            concurrency = 10
+            sem = asyncio.Semaphore(concurrency)
+
+            async def _fetch_and_parse(item):
+                async with sem:
+                    content_id = int(item.get("contentid", 0))
+                    detail = None
+                    try:
+                        detail = await self.tour_api.get_full_place_info(content_id, 15)
+                    except Exception as e:
+                        print(f"축제 상세 조회 실패 (ID: {content_id}), 목록 데이터만 사용: {e}")
+
+                    try:
+                        return self._parse_festival_data(item, detail, today)
+                    except Exception as e:
+                        print(f"축제 데이터 변환 오류 (ID: {content_id}): {e}")
+                        return None
+
+            tasks = [_fetch_and_parse(item) for item in festivals[:request.max_items]]
+            results = []
+            if tasks:
+                results = await asyncio.gather(*tasks)
+        else:
+            # 경량 모드: 상세 API 호출 없이 목록 데이터만으로 파싱 (캘린더용)
+            results = []
+            for item in festivals[:request.max_items]:
                 try:
-                    detail = await self.tour_api.get_full_place_info(content_id, 15)
+                    results.append(self._parse_festival_data(item, None, today))
                 except Exception as e:
-                    # 404 포함 어떤 에러든 detail 없이 목록 데이터만으로 계속 진행
-                    print(f"축제 상세 조회 실패 (ID: {content_id}), 목록 데이터만 사용: {e}")
-
-                try:
-                    return self._parse_festival_data(item, detail, today)
-                except Exception as e:
-                    print(f"축제 데이터 변환 오류 (ID: {content_id}): {e}")
-                    return None
-
-        tasks = [_fetch_and_parse(item) for item in festivals[:request.max_items]]
-        results = []
-        if tasks:
-            results = await asyncio.gather(*tasks)
+                    print(f"축제 데이터 변환 오류 (ID: {item.get('contentid')}): {e}")
+                    results.append(None)
 
         festival_infos = [r for r in results if r]
 
@@ -162,7 +172,8 @@ class FestivalService:
             max_items=200
         )
 
-        result = await self.search_festivals(db, request)
+        # 캘린더용: 상세 API 호출 없이 경량 목록 데이터만 사용
+        result = await self.search_festivals(db, request, fetch_detail=False)
         if not result["success"]:
             return result
 
