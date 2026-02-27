@@ -112,6 +112,8 @@ class Trip(Base):
     # 관계 설정
     user = relationship("User", back_populates="trips")
     itineraries = relationship("Itinerary", back_populates="trip", cascade="all, delete-orphan")
+    # 여행에 연결된 채팅 세션도 함께 삭제되도록 설정
+    chat_sessions = relationship("ChatSession", back_populates="trip", cascade="all, delete-orphan")
 
 
 class Itinerary(Base):
@@ -191,7 +193,7 @@ class ChatSession(Base):
 
     # 관계 설정
     user = relationship("User", back_populates="chat_sessions")
-    trip = relationship("Trip")
+    trip = relationship("Trip", back_populates="chat_sessions")
 
 
 # 7. Board Domain (여행 후기 게시판)
