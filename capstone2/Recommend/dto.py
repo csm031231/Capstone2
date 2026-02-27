@@ -74,7 +74,9 @@ class HybridRecommendRequest(BaseModel):
     """이미지 + 조건 통합 추천 요청"""
     image_path: str = Field(..., description="분석할 이미지 경로")
     condition: Optional[RecommendCondition] = Field(None, description="추가 조건")
-    top_k: int = Field(default=10, ge=1, le=50)
+    # 이미지 + 조건 추천에서도 기본적으로 100개 정도까지 후보를
+    # 뽑은 뒤 내부에서 줄이기 때문에 한도를 100으로 확장.
+    top_k: int = Field(default=10, ge=1, le=100)
 
 
 # ==================== 추천 결과 DTOs ====================

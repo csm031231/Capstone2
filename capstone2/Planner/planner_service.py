@@ -117,7 +117,15 @@ class PlannerService:
         total_days: int
     ) -> List[dict]:
         """후보 장소 수집"""
-        # 필요 장소 수 계산 (하루 12개 기준으로 여유분 포함, 최대 100개)
+# 필요 장소 수 계산
+    # 과거에는 request.max_places_per_day * total_days * 2 로 계산했는데,
+    # 사용자가 하루 값을 높이면 RecommendCondition.top_k(기존 상한 50)를
+    # 넘겨버리는 일이 있었습니다. 이로 인해 요청이 검증에 실패하여
+    # `Input should be less than or equal to 50` 오류가 났습니다.
+    #
+    # 이후 RecommendCondition의 제한을 100으로 확장하고, 계산도
+    # 하드코딩된 12(기본 max_places_per_day) 기준으로 변경해 두었습니다.
+    # 최종적으로 min(needed, 100)으로 클램프하여 버그를 방지합니다.
         needed = 12 * total_days * 2
 
         # 테마 결정
