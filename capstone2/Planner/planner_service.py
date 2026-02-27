@@ -189,6 +189,47 @@ class PlannerService:
                             "must_visit": True
                         })
 
+        # 카테고리 다양성 보장: 맛집/카페가 부족하면 DB에서 추가로 가져옴
+        # (테마 점수가 낮아서 추천에서 빠진 식당/카페를 강제로 포함)
+        from sqlalchemy import select as sa_select2, nulls_last
+        existing_ids = {c['place_id'] for c in candidates}
+        # 일수당 최소 맛집 2개, 카페 1개 보장
+        min_counts = {"맛집": total_days * 2, "카페": total_days}
+        cat_counts = {}
+        for c in candidates:
+            cat = c.get('category', '')
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        for cat, min_count in min_counts.items():
+            shortage = min_count - cat_counts.get(cat, 0)
+            if shortage > 0:
+                extra_q = (
+                    sa_select2(Place)
+                    .where(Place.address.contains(request.region))
+                    .where(Place.category == cat)
+                    .where(~Place.id.in_(existing_ids))
+                    .order_by(nulls_last(Place.readcount.desc()))
+                    .limit(shortage + 2)
+                )
+                extra_result = await db.execute(extra_q)
+                for p in extra_result.scalars().all():
+                    candidates.append({
+                        "place_id": p.id,
+                        "name": p.name,
+                        "category": p.category,
+                        "address": p.address,
+                        "latitude": p.latitude,
+                        "longitude": p.longitude,
+                        "image_url": p.image_url,
+                        "tags": p.tags,
+                        "operating_hours": p.operating_hours,
+                        "closed_days": p.closed_days,
+                        "description": p.description,
+                        "readcount": p.readcount,
+                        "score": 0.5
+                    })
+                    existing_ids.add(p.id)
+
         return candidates
 
     async def _generate_with_gpt(
@@ -232,6 +273,11 @@ class PlannerService:
 3. 카테고리를 다양하게 배치하세요 (관광지 → 식사 → 카페 등)
 4. 필수 포함 장소는 반드시 일정에 포함하세요
 5. 사용자 선호도에 맞는 장소를 우선 선택하세요
+6. 각 장소의 reason은 "왜 이 장소를 선택했는지" 구체적으로 작성하세요 (예: 인기 랜드마크 + 오전 첫 방문지로 적합, 점심 식사 후 도보 5분 거리)
+7. day_summaries는 "이 날 일정을 왜 이렇게 구성했는지" 이유를 2-3문장으로 작성하세요 (지역 집중, 카테고리 균형, 동선 흐름 등)
+8. 시간대별로 균형 있게 배치하세요: 오전(1~2번)엔 관광지/자연, 점심(3번째)엔 맛집/식당, 오후(4번째)엔 카페/관광지, 저녁(5번째~)엔 야경/맛집
+9. 하루 최대 {request.max_places_per_day}개를 최대한 채우세요. 후보 목록에 맛집·카페가 있으면 반드시 포함하세요
+10. 같은 place_id를 여러 날에 중복 사용하지 마세요. 각 장소는 전체 일정에서 한 번만 등장해야 합니다
 
 ## 응답 형식 (JSON만 출력)
 {{
@@ -244,15 +290,15 @@ class PlannerService:
           "place_id": 123,
           "order": 1,
           "stay_duration": 60,
-          "reason": "선택 이유 (예: 부산 대표 해변)"
+          "reason": "구체적 선택 이유 (예: 해운대 대표 명소로 방문객 1위, 오전 일찍 방문해야 덜 붐빔)"
         }}
       ]
     }}
   ],
   "trip_summary": "전체 여행 요약 (1-2문장)",
   "day_summaries": {{
-    "1": "첫째 날 요약",
-    "2": "둘째 날 요약"
+    "1": "이 날 일정 구성 이유: 해운대 인근 장소들을 묶어 이동 효율을 높였고, 오전엔 해변·오후엔 맛집·저녁엔 야경 순으로 시간대별 카테고리를 배치했습니다.",
+    "2": "둘째 날 구성 이유: ..."
   }}
 }}"""
 
@@ -362,8 +408,9 @@ class PlannerService:
         draft: dict,
         place_dict: Dict[int, dict]
     ) -> Dict[int, List[dict]]:
-        """GPT 결과를 일차별 장소 딕셔너리로 변환"""
+        """GPT 결과를 일차별 장소 딕셔너리로 변환 (전체 일정에서 장소 중복 제거)"""
         result = {}
+        used_place_ids: set = set()  # 이미 배치된 place_id 추적
 
         for day_data in draft.get("days", []):
             day_num = day_data["day_number"]
@@ -371,17 +418,19 @@ class PlannerService:
 
             for place_data in day_data.get("places", []):
                 place_id = place_data["place_id"]
-                if place_id in place_dict:
-                    place = place_dict[place_id].copy()
-                    place['order_index'] = place_data.get("order", len(places) + 1)
-                    place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
-                    place['selection_reason'] = place_data.get("reason", "AI 추천")
-                    place['day_number'] = day_num
-                    # 키이름 통일 (category를 표준으로)
-                    place['place_category'] = place.get('category')
-                    place['place_name'] = place.get('name')
-                    place['place_address'] = place.get('address')
-                    places.append(place)
+                # 후보 목록에 없거나 이미 다른 날에 배치된 장소는 스킵
+                if place_id not in place_dict or place_id in used_place_ids:
+                    continue
+                place = place_dict[place_id].copy()
+                place['order_index'] = place_data.get("order", len(places) + 1)
+                place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
+                place['selection_reason'] = place_data.get("reason", "AI 추천")
+                place['day_number'] = day_num
+                place['place_category'] = place.get('category')
+                place['place_name'] = place.get('name')
+                place['place_address'] = place.get('address')
+                places.append(place)
+                used_place_ids.add(place_id)
 
             result[day_num] = places
 

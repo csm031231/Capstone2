@@ -20,6 +20,8 @@ class ChatService:
 
     SYSTEM_PROMPT = """당신은 여행 일정 수정을 도와주는 AI 어시스턴트입니다.
 
+반드시 아래 JSON 형식으로만 응답하세요. 자연어 텍스트는 절대 출력하지 마세요.
+
 사용자가 일정 수정을 요청하면:
 1. 요청을 정확히 이해합니다
 2. 필요한 변경 사항을 파악합니다
@@ -126,7 +128,8 @@ class ChatService:
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=1000,
-                temperature=0.5
+                temperature=0.5,
+                response_format={"type": "json_object"}
             )
 
         result = None

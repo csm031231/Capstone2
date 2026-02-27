@@ -1,6 +1,8 @@
+import json
 import traceback
+from datetime import date
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import provide_session
@@ -227,6 +229,149 @@ async def generate_with_photo(
         )
         return GenerateWithPhotoResponse(
             needs_clarification=False,
+            photo_info={
+                "city": request.photo_city,
+                "landmark": request.photo_landmark,
+                "scene_types": request.photo_scene_types,
+            } if (request.photo_city or request.photo_landmark) else None,
+            trip_data=trip_data,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"일정 생성 중 오류: {str(e)}"
+        )
+
+
+# ==================== 사진 파일 업로드 + 일정 생성 (Swagger 통합 테스트용) ====================
+
+@router.post("/generate-with-photo-upload", response_model=GenerateWithPhotoResponse)
+async def generate_with_photo_upload(
+    image: UploadFile = File(..., description="여행 사진 파일"),
+    title: str = Form(..., description="여행 제목"),
+    region: str = Form(..., description="희망 여행 지역 (예: 부산)"),
+    start_date: date = Form(..., description="시작일 (YYYY-MM-DD)"),
+    end_date: date = Form(..., description="종료일 (YYYY-MM-DD)"),
+    must_visit_places: str = Form(default="[]", description="필수 장소 ID 배열 (JSON, 예: [1,2])"),
+    exclude_places: str = Form(default="[]", description="제외 장소 ID 배열 (JSON, 예: [3])"),
+    themes: str = Form(default="[]", description="테마 배열 (JSON, 예: [\"해변\",\"맛집\"])"),
+    max_places_per_day: int = Form(default=5, ge=2, le=10, description="하루 최대 장소 수"),
+    use_photo_themes: bool = Form(default=False, description="사진 분위기를 테마에 반영할지 여부"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    사진 업로드 + AI 일정 생성 통합 엔드포인트 (Swagger docs에서 직접 테스트 가능)
+
+    **흐름:**
+    1. 사진을 업로드하면 GPT Vision이 자동으로 지역/분위기 분석
+    2. 사진 지역 ≠ 희망 여행 지역이면 → `needs_clarification=true` + 확인 메시지 반환
+    3. `use_photo_themes=true`로 재요청하면 → 사진 분위기를 테마로 반영하여 일정 생성
+
+    **use_photo_themes 사용법:**
+    - 1차 요청: `use_photo_themes=false` → 지역 불일치 여부 확인
+    - 2차 요청: `use_photo_themes=true` → 사진 분위기 반영하여 일정 생성
+    """
+    from Vision.gpt_vision import analyze_image_with_gpt, determine_type
+    from Vision.exif_utils import extract_exif_info
+    from Vision.vision_router import _validate_and_read_image, _save_image
+
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="종료일은 시작일보다 이후여야 합니다"
+        )
+
+    # 리스트 파라미터 파싱
+    try:
+        must_visit_list: List[int] = json.loads(must_visit_places)
+        exclude_list: List[int] = json.loads(exclude_places)
+        themes_list: List[str] = json.loads(themes)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="must_visit_places, exclude_places, themes는 유효한 JSON 배열이어야 합니다"
+        )
+
+    # 이미지 검증 및 저장
+    contents, img, ext = await _validate_and_read_image(image)
+    exif_info = extract_exif_info(img)
+    file_path = _save_image(contents, ext)
+
+    # GPT Vision 분석
+    try:
+        analysis = await analyze_image_with_gpt(file_path)
+        result_type = determine_type(analysis, exif_info)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"사진 분석 중 오류: {str(e)}"
+        )
+
+    photo_city = analysis.city
+    photo_landmark = analysis.landmark
+    photo_scene_types = analysis.scene_type or []
+
+    # 지역 불일치 확인 (use_photo_themes=false이고 아직 확인 안 된 경우)
+    if photo_city and not use_photo_themes and not _regions_match(photo_city, region):
+        photo_label = photo_landmark or photo_city
+        suggested_themes = _extract_themes_from_scene(photo_scene_types)
+
+        return GenerateWithPhotoResponse(
+            needs_clarification=True,
+            clarification_message=(
+                f"사진은 {photo_label}으로 추정되는데, "
+                f"{region} 여행을 원하시는군요! "
+                f"사진의 분위기({', '.join(photo_scene_types) if photo_scene_types else '분석됨'})를 "
+                f"{region} 일정 테마에 반영할까요?"
+            ),
+            photo_info={
+                "city": photo_city,
+                "landmark": photo_landmark,
+                "scene_types": photo_scene_types,
+                "result_type": result_type,
+                "confidence": analysis.confidence,
+            },
+            suggested_themes=suggested_themes,
+        )
+
+    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    merged_themes = list(themes_list)
+    if use_photo_themes and photo_scene_types:
+        for t in _extract_themes_from_scene(photo_scene_types):
+            if t not in merged_themes:
+                merged_themes.append(t)
+
+    # 일정 생성
+    generate_request = GenerateRequest(
+        title=title,
+        region=region,
+        start_date=start_date,
+        end_date=end_date,
+        must_visit_places=must_visit_list,
+        exclude_places=exclude_list,
+        themes=merged_themes,
+        max_places_per_day=max_places_per_day,
+    )
+
+    preference = await get_user_preference(db, current_user.id)
+    planner = get_planner_service()
+
+    try:
+        trip_data = await planner.generate_itinerary(
+            db, current_user.id, generate_request, preference
+        )
+        return GenerateWithPhotoResponse(
+            needs_clarification=False,
+            photo_info={
+                "city": photo_city,
+                "landmark": photo_landmark,
+                "scene_types": photo_scene_types,
+                "result_type": result_type,
+                "confidence": analysis.confidence,
+            },
             trip_data=trip_data,
         )
     except ValueError as e:

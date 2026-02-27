@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 class TimeConstraintService:
     """시간 제약 처리 서비스"""
 
+    # 야경/야간 관련 키워드 (이 태그가 있으면 18:00 이후에만 배치)
+    NIGHT_KEYWORDS = {"야경", "야간", "night", "루프탑", "야시장", "불꽃", "일몰", "노을"}
+
     # 카테고리별 기본 체류 시간 (분)
     DEFAULT_STAY_DURATION = {
         "관광지": 90,
@@ -119,15 +122,20 @@ class TimeConstraintService:
                 base_duration = self.DEFAULT_STAY_DURATION.get(category, 60)
                 stay_duration = int(base_duration * pace_config["stay_multiplier"])
 
-                # 종료 시간 확인
+                # 종료 시간 확인 - 도착 시간이 종료 시간 이후면 스킵
+                # (체류가 종료 시간을 넘는 건 허용 - 도착만 하면 됨)
                 finish_time = arrival_time + timedelta(minutes=stay_duration)
-                if finish_time > end_datetime:
+                if arrival_time >= end_datetime:
                     if is_must_visit:
                         warnings.append(
-                            f"{day_num}일차: {place_name} 방문 시 선호 종료 시간을 초과합니다"
+                            f"{day_num}일차: {place_name}은(는) 선호 종료 시간 이후 도착이지만 필수 방문 장소이므로 포함합니다"
                         )
                     else:
-                        continue  # break → continue: 해당 장소만 스킵, 이후 장소 계속 확인
+                        continue
+                elif finish_time > end_datetime:
+                    warnings.append(
+                        f"{day_num}일차: {place_name} 방문이 선호 종료 시간을 초과합니다"
+                    )
 
                 # 일정 추가
                 place['suggested_arrival_time'] = arrival_time.time()
