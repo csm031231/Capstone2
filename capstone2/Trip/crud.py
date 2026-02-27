@@ -4,7 +4,7 @@ from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from datetime import date
 
-from core.models import Trip, Itinerary, Place
+from core.models import Trip, Itinerary, Place, ChatSession
 from Trip.dto import TripCreate, TripUpdate, ItineraryCreate, ItineraryUpdate, ItineraryReorderItem
 
 
@@ -99,6 +99,9 @@ async def delete_trip(db: AsyncSession, trip_id: int, user_id: int) -> bool:
     trip = await get_trip_by_id(db, trip_id, user_id)
     if not trip:
         return False
+
+    # chat_sessions의 FK 제약 조건으로 인해 trip 삭제 전 먼저 연결된 세션 삭제
+    await db.execute(delete(ChatSession).where(ChatSession.trip_id == trip_id))
 
     await db.delete(trip)
     await db.commit()

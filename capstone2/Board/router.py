@@ -174,6 +174,9 @@ async def get_post(
 
     await crud.increment_view_count(db, post_id)
 
+    # commit 이후 post 객체가 expire되므로 재조회 (MissingGreenlet 방지)
+    post = await crud.get_post_by_id(db, post_id)
+
     is_liked = False
     if current_user:
         like = await crud.get_like(db, post_id, current_user.id)
