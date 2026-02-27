@@ -26,9 +26,9 @@ class GenerateRequest(BaseModel):
         description="테마 오버라이드 (없으면 선호도 사용)"
     )
     max_places_per_day: int = Field(
-        default=5,
+        default=10,
         ge=2,
-        le=10,
+        le=20,
         description="하루 최대 장소 수"
     )
 
@@ -110,7 +110,7 @@ class GenerateWithPhotoRequest(BaseModel):
     must_visit_places: List[int] = []
     exclude_places: List[int] = []
     themes: List[str] = []
-    max_places_per_day: int = Field(default=5, ge=2, le=10)
+    max_places_per_day: int = Field(default=10, ge=2, le=20)
     start_location: Optional[Dict[str, float]] = None
     end_location: Optional[Dict[str, float]] = None
 

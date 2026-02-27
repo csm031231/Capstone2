@@ -257,7 +257,7 @@ async def generate_with_photo_upload(
     must_visit_places: str = Form(default="[]", description="필수 장소 ID 배열 (JSON, 예: [1,2])"),
     exclude_places: str = Form(default="[]", description="제외 장소 ID 배열 (JSON, 예: [3])"),
     themes: str = Form(default="[]", description="테마 배열 (JSON, 예: [\"해변\",\"맛집\"])"),
-    max_places_per_day: int = Form(default=5, ge=2, le=10, description="하루 최대 장소 수"),
+    max_places_per_day: int = Form(default=10, ge=2, le=20, description="하루 최대 장소 수"),
     use_photo_themes: bool = Form(default=False, description="사진 분위기를 테마에 반영할지 여부"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(provide_session)

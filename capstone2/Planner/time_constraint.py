@@ -63,11 +63,11 @@ class TimeConstraintService:
         # 시간 설정
         if preference:
             day_start = preference.preferred_start_time or time(9, 0)
-            day_end = preference.preferred_end_time or time(21, 0)
+            day_end = preference.preferred_end_time or time(23, 0)
             pace = preference.travel_pace or "moderate"
         else:
             day_start = time(9, 0)
-            day_end = time(21, 0)
+            day_end = time(23, 0)
             pace = "moderate"
 
         pace_config = self.PACE_CONFIG.get(pace, self.PACE_CONFIG["moderate"])
@@ -80,6 +80,48 @@ class TimeConstraintService:
             current_time = datetime.combine(current_date, day_start)
             end_datetime = datetime.combine(current_date, day_end)
 
+            # 식사/야경 구조 강제 재배치:
+            # 오전(others 전반) → 점심 식당 → 오후(others 후반) → 저녁 식당 → 야경
+            NON_NIGHT_CATEGORIES = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
+
+            def _is_night(p):
+                category = (p.get('place_category') or p.get('category') or '')
+                if category in NON_NIGHT_CATEGORIES:
+                    return False
+                tags = p.get('tags') or []
+                name = (p.get('place_name') or p.get('name', '')).lower()
+                return (
+                    p.get('is_night_place', False)
+                    or any(kw in t.lower() for t in tags for kw in self.NIGHT_KEYWORDS)
+                    or any(kw in name for kw in self.NIGHT_KEYWORDS)
+                )
+
+            def _is_meal(p):
+                cat = p.get('place_category') or p.get('category') or ''
+                return cat in ('맛집', '식당')
+
+            night_places = [p for p in places if _is_night(p)]
+            meals = [p for p in places if _is_meal(p) and not _is_night(p)]
+            others = [p for p in places if not _is_meal(p) and not _is_night(p)]
+
+            # 식당 최대 2개 (초과분은 버림)
+            lunch = meals[0] if len(meals) >= 1 else None
+            dinner = meals[1] if len(meals) >= 2 else None
+
+            # others를 오전/오후로 분리 (오전은 최대 2개: 9시부터 너무 많으면 점심이 14시 이후로 밀림)
+            split = min(len(others) // 2, 2)
+            morning = others[:split]
+            afternoon = others[split:]
+
+            # 재구성: 오전 → 점심 → 오후 → 저녁 → 야경
+            places = morning
+            if lunch:
+                places = places + [lunch]
+            places = places + afternoon
+            if dinner:
+                places = places + [dinner]
+            places = places + night_places
+
             day_itineraries = []
 
             for i, place in enumerate(places):
@@ -89,6 +131,34 @@ class TimeConstraintService:
                 # 이동 시간 반영: 이전 장소 체류 종료 후 현재 장소까지의 이동시간을 더함
                 travel_time = place.get('travel_time_from_prev', 0) or 0
                 arrival_time = current_time + timedelta(minutes=travel_time)
+
+                # 맛집/식당: 점심(12:00~13:00) 또는 저녁(18:30~19:30) 시간대에만 배치
+                place_category = place.get('place_category') or place.get('category') or ''
+                if place_category in ('맛집', '식당'):
+                    t = arrival_time.time()
+                    lunch_start = time(12, 0)
+                    lunch_end = time(14, 0)
+                    dinner_start = time(18, 30)
+                    if t < lunch_start:
+                        # 점심 시간으로 push
+                        meal_time = datetime.combine(current_date, lunch_start)
+                        arrival_time = meal_time
+                        if current_time < meal_time:
+                            current_time = meal_time
+                    elif lunch_end <= t < dinner_start:
+                        # 오후 중간 시간이면 저녁 시간으로 push
+                        meal_time = datetime.combine(current_date, dinner_start)
+                        arrival_time = meal_time
+                        if current_time < meal_time:
+                            current_time = meal_time
+
+                # 야경/야간 장소: 20:00 이전 도착 불가 (위에서 이미 마지막으로 재정렬됨)
+                is_night_place = _is_night(place)
+                if is_night_place and arrival_time.time() < time(20, 0):
+                    night_start = datetime.combine(current_date, time(20, 0))
+                    arrival_time = night_start
+                    if current_time < night_start:
+                        current_time = night_start
 
                 # 휴무일 체크
                 if self._is_closed(place.get('closed_days'), current_date):
@@ -117,10 +187,14 @@ class TimeConstraintService:
                     else:
                         continue
 
-                # 체류 시간 결정
+                # 체류 시간 결정: GPT 제안값 우선, 없으면 카테고리 기본값 사용
                 category = place.get('place_category') or place.get('category')
                 base_duration = self.DEFAULT_STAY_DURATION.get(category, 60)
-                stay_duration = int(base_duration * pace_config["stay_multiplier"])
+                gpt_suggested = place.get('suggested_stay_duration')
+                if gpt_suggested and isinstance(gpt_suggested, (int, float)) and 15 <= gpt_suggested <= 300:
+                    stay_duration = int(gpt_suggested * pace_config["stay_multiplier"])
+                else:
+                    stay_duration = int(base_duration * pace_config["stay_multiplier"])
 
                 # 종료 시간 확인 - 도착 시간이 종료 시간 이후면 스킵
                 # (체류가 종료 시간을 넘는 건 허용 - 도착만 하면 됨)
@@ -144,6 +218,10 @@ class TimeConstraintService:
 
                 # 다음 장소 기준 시간 = 현재 체류 종료 + 버퍼
                 current_time = finish_time + timedelta(minutes=pace_config["buffer_time"])
+
+            # order_index를 실제 처리 순서(도착 시간 순)로 재부여
+            for idx, place in enumerate(day_itineraries):
+                place['order_index'] = idx + 1
 
             result[day_num] = day_itineraries
 
@@ -169,9 +247,9 @@ class TimeConstraintService:
         errors = []
 
         if preference:
-            day_end = preference.preferred_end_time or time(21, 0)
+            day_end = preference.preferred_end_time or time(23, 0)
         else:
-            day_end = time(21, 0)
+            day_end = time(23, 0)
 
         for day_num, places in places_by_day.items():
             if isinstance(day_num, str) and day_num.startswith('_'):

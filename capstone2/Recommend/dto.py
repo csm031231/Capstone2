@@ -67,7 +67,7 @@ class RecommendCondition(BaseModel):
     budget_level: Optional[str] = Field(None, description="예산 수준")
     travel_date: Optional[date] = Field(None, description="여행 날짜 (휴무일 필터)")
     exclude_places: List[int] = Field(default=[], description="제외할 장소 ID")
-    top_k: int = Field(default=10, ge=1, le=50, description="추천 개수")
+    top_k: int = Field(default=10, ge=1, le=100, description="추천 개수")
 
 
 class HybridRecommendRequest(BaseModel):

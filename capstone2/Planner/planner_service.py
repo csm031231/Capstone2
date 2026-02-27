@@ -117,8 +117,8 @@ class PlannerService:
         total_days: int
     ) -> List[dict]:
         """후보 장소 수집"""
-        # 필요 장소 수 계산 (여유분 포함, 최대 100개)
-        needed = request.max_places_per_day * total_days * 2
+        # 필요 장소 수 계산 (하루 12개 기준으로 여유분 포함, 최대 100개)
+        needed = 12 * total_days * 2
 
         # 테마 결정
         themes = request.themes
@@ -226,7 +226,8 @@ class PlannerService:
                         "closed_days": p.closed_days,
                         "description": p.description,
                         "readcount": p.readcount,
-                        "score": 0.5
+                        "score": 0.85,
+                        "meal_candidate": True  # 식사 후보 표시
                     })
                     existing_ids.add(p.id)
 
@@ -256,7 +257,6 @@ class PlannerService:
 ## 여행 정보
 - 지역: {request.region}
 - 기간: {request.start_date} ~ {request.end_date} ({total_days}일)
-- 하루 최대 장소: {request.max_places_per_day}개
 
 ## 사용자 선호도
 {pref_info}
@@ -273,10 +273,14 @@ class PlannerService:
 3. 카테고리를 다양하게 배치하세요 (관광지 → 식사 → 카페 등)
 4. 필수 포함 장소는 반드시 일정에 포함하세요
 5. 사용자 선호도에 맞는 장소를 우선 선택하세요
-6. 각 장소의 reason은 "왜 이 장소를 선택했는지" 구체적으로 작성하세요 (예: 인기 랜드마크 + 오전 첫 방문지로 적합, 점심 식사 후 도보 5분 거리)
+6. 각 장소의 reason은 장소 특성과 선택 이유만 작성하세요. "아침", "점심", "저녁", "오전", "오후" 등 시간 표현은 절대 쓰지 마세요 (예: "인기 랜드마크로 방문객 1위", "근처 맛집으로 현지인 추천", "전통 분위기의 차 문화 체험 가능"). is_night=false인 장소는 reason에 "야경", "야간", "밤", "night" 등의 야간 표현을 절대 쓰지 마세요
 7. day_summaries는 "이 날 일정을 왜 이렇게 구성했는지" 이유를 2-3문장으로 작성하세요 (지역 집중, 카테고리 균형, 동선 흐름 등)
-8. 시간대별로 균형 있게 배치하세요: 오전(1~2번)엔 관광지/자연, 점심(3번째)엔 맛집/식당, 오후(4번째)엔 카페/관광지, 저녁(5번째~)엔 야경/맛집
-9. 하루 최대 {request.max_places_per_day}개를 최대한 채우세요. 후보 목록에 맛집·카페가 있으면 반드시 포함하세요
+8. 시간대별 배치 규칙: 오전(09~12시)엔 관광지/자연/박물관 2~3개, 점심(12~13시)엔 맛집/식당 1개, 오후(13~18시)엔 카페/쇼핑/체험/관광지 2~3개, 저녁(18:30~19:30)엔 맛집/식당 1개, 저녁 식사 후(19:30~22:00)엔 야경/야시장/루프탑 포함 1~2개. is_night=true는 "한강야경", "야경명소", "루프탑", "야시장", "불꽃놀이", "일몰명소"처럼 반드시 밤에만 의미 있는 장소에만 사용하세요 - 체험관·박물관·공원·맛집·카페는 is_night=false입니다. is_night=true인 장소는 반드시 20:00 이후에 배치하고 그 날 가장 마지막 order에 하나만 넣으며 stay_duration을 90분 이상으로 설정하세요
+9. 하루 장소 수 제한 없이 일정을 빽빽하게 채우세요. 반드시 지키세요:
+   - 맛집/식당은 하루에 정확히 2개만: 점심 1개(12:00~13:00 도착), 저녁 1개(18:30~19:30 도착). 이 외 시간에는 맛집/식당을 배치하지 마세요
+   - 점심·저녁 사이 빈 시간(13~18시)에는 반드시 카페·쇼핑·체험·관광지로 2~3개 채우세요
+   - 저녁 식사(18:30~19:30) 이후에도 반드시 야경 또는 야간 명소 1개를 추가하여 일정이 22:00까지 이어지도록 하세요
+   - 자연/공원 장소는 하루 최대 2개로 제한하세요
 10. 같은 place_id를 여러 날에 중복 사용하지 마세요. 각 장소는 전체 일정에서 한 번만 등장해야 합니다
 
 ## 응답 형식 (JSON만 출력)
@@ -290,7 +294,8 @@ class PlannerService:
           "place_id": 123,
           "order": 1,
           "stay_duration": 60,
-          "reason": "구체적 선택 이유 (예: 해운대 대표 명소로 방문객 1위, 오전 일찍 방문해야 덜 붐빔)"
+          "is_night": false,
+          "reason": "장소 특성 위주 선택 이유 (예: 해운대 대표 명소로 방문객 1위, 도보 5분 거리로 동선 효율적)"
         }}
       ]
     }}
@@ -329,20 +334,21 @@ class PlannerService:
         raise ValueError(f"GPT 응답을 3회 시도 후에도 파싱할 수 없습니다: {last_error}")
 
     def _format_places_for_gpt(self, candidates: List[dict], total_days: int = 1) -> str:
-        """GPT용 장소 정보 포맷팅 (must_visit 장소는 잘리지 않도록)"""
-        # must_visit 장소를 먼저 포함
-        must_visit_places = [c for c in candidates if c.get('must_visit')]
-        other_places = [c for c in candidates if not c.get('must_visit')]
+        """GPT용 장소 정보 포맷팅 (must_visit/meal_candidate 장소는 잘리지 않도록)"""
+        # must_visit, meal_candidate 장소는 항상 포함
+        priority_places = [c for c in candidates if c.get('must_visit') or c.get('meal_candidate')]
+        other_places = [c for c in candidates if not c.get('must_visit') and not c.get('meal_candidate')]
 
-        # 일수에 비례해 전달 장소 수 결정 (하루 최소 8개, 최대 80개)
-        target = max(total_days * 8, 30)
-        max_others = max(target - len(must_visit_places), 10)
-        selected = must_visit_places + other_places[:max_others]
+        # 일수에 비례해 전달 장소 수 결정 (하루 최소 15개, 최대 80개)
+        target = max(total_days * 15, 40)
+        max_others = max(target - len(priority_places), 15)
+        selected = priority_places + other_places[:max_others]
 
         lines = []
         for c in selected:
             tags_str = ', '.join(c.get('tags', [])[:5]) if c.get('tags') else ''
             must = " [필수]" if c.get('must_visit') else ""
+            meal = " [식사후보-반드시포함]" if c.get('meal_candidate') else ""
             popularity = f", 인기도: {c.get('readcount', 0)}" if c.get('readcount') else ""
             desc_short = ""
             if c.get('description'):
@@ -351,7 +357,7 @@ class PlannerService:
                 f"- ID: {c['place_id']}, 이름: {c['name']}, "
                 f"카테고리: {c.get('category', '기타')}, "
                 f"태그: [{tags_str}], 점수: {c.get('score', 0):.2f}"
-                f"{popularity}{desc_short}{must}"
+                f"{popularity}{desc_short}{must}{meal}"
             )
         return '\n'.join(lines)
 
@@ -424,6 +430,7 @@ class PlannerService:
                 place = place_dict[place_id].copy()
                 place['order_index'] = place_data.get("order", len(places) + 1)
                 place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
+                place['is_night_place'] = place_data.get("is_night", False)
                 place['selection_reason'] = place_data.get("reason", "AI 추천")
                 place['day_number'] = day_num
                 place['place_category'] = place.get('category')
