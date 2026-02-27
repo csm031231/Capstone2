@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, Field
@@ -167,6 +167,33 @@ async def collect_bulk(
         "total_collected": total_collected,
         "by_area": results
     }
+
+
+# ==================== 기존 데이터 보완 ====================
+
+@router.post("/update/missing")
+async def update_missing_descriptions(
+    batch_size: int = Query(default=100, ge=10, le=500, description="한 번에 처리할 개수"),
+    enhance_with_wiki: bool = Query(default=True, description="Wikipedia 보강 여부"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    기존 데이터 보완 - description 없는 places에 상세 정보 채우기
+
+    - description이 NULL인 장소를 batch_size개씩 처리
+    - TourAPI 재호출 → description, 운영시간, 휴무일, 요금 업데이트
+    - description 기반 tags 재생성
+    - 전체 20,957개 처리 시 여러 번 반복 호출 필요 (remaining 확인)
+
+    예시: batch_size=100이면 한 번 호출 시 100개 처리, remaining이 0이 될 때까지 반복
+    """
+    collector = get_collector_service()
+    return await collector.update_missing_data(
+        db=db,
+        batch_size=batch_size,
+        enhance_with_wiki=enhance_with_wiki
+    )
 
 
 # ==================== FAISS 인덱싱 ====================

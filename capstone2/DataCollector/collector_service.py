@@ -1,7 +1,7 @@
 import asyncio
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, and_
 
 from core.models import Place
 from DataCollector.tour_api_service import TourAPIService, get_tour_api_service
@@ -278,6 +278,132 @@ class DataCollectorService:
             "collected": collected,
             "skipped": skipped,
             "errors": len(errors)
+        }
+
+    async def update_missing_data(
+        self,
+        db: AsyncSession,
+        batch_size: int = 100,
+        enhance_with_wiki: bool = True
+    ) -> Dict[str, Any]:
+        """
+        기존 데이터 중 description이 없는 places에 상세 정보 일괄 업데이트
+
+        - description IS NULL + content_id 있는 것만 대상
+        - TourAPI 재호출 → description, operating_hours, closed_days, fee_info 업데이트
+        - description이 짧으면 Wikipedia로 보강
+        - description 기반 tags 재생성
+        - batch_size개씩 처리 (여러 번 호출해서 전체 업데이트 가능)
+        """
+        # 처리 전 남은 전체 개수
+        count_result = await db.execute(
+            select(func.count()).select_from(Place).where(
+                and_(
+                    Place.description.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            )
+        )
+        remaining_before = count_result.scalar() or 0
+
+        # 이번 배치 대상 조회
+        result = await db.execute(
+            select(Place).where(
+                and_(
+                    Place.description.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            ).limit(batch_size)
+        )
+        places = result.scalars().all()
+
+        updated = 0
+        skipped = 0
+        errors = 0
+
+        for place in places:
+            try:
+                # TourAPI 상세 조회
+                detail = await self.tour_api.get_full_place_info(
+                    place.content_id, place.content_type_id
+                )
+
+                description = ""
+                if detail is not None:
+                    description = self.tour_api._clean_html(detail.get("overview", ""))
+
+                # Wikipedia 보강 (description이 없거나 50자 미만)
+                if enhance_with_wiki and (not description or len(description) < 50):
+                    wiki_desc = await self.wiki_service.enhance_description(
+                        place.name, description or None
+                    )
+                    if wiki_desc:
+                        description = wiki_desc
+
+                # description 없으면 스킵 (NULL 유지)
+                if not description:
+                    skipped += 1
+                    await asyncio.sleep(0.2)
+                    continue
+
+                # 운영시간, 휴무, 요금 (기존 값 없을 때만 업데이트)
+                if detail is not None:
+                    operating_hours = self.tour_api._clean_html(
+                        detail.get("usetime") or detail.get("opentimefood") or
+                        detail.get("usetimeculture") or ""
+                    )
+                    closed_days = self.tour_api._clean_html(
+                        detail.get("restdate") or detail.get("restdatefood") or
+                        detail.get("restdateculture") or ""
+                    )
+                    fee_info = self.tour_api._clean_html(detail.get("usefee") or "")
+                    tel      = self.tour_api._clean_html(detail.get("tel", ""))
+                    homepage = self.tour_api._clean_html(detail.get("homepage", ""))
+
+                    if operating_hours and not place.operating_hours:
+                        place.operating_hours = operating_hours
+                    if closed_days and not place.closed_days:
+                        place.closed_days = closed_days
+                    if fee_info and not place.fee_info:
+                        place.fee_info = fee_info
+                    if tel and not place.tel:
+                        place.tel = tel
+                    if homepage and not place.homepage:
+                        place.homepage = homepage
+
+                # description 업데이트
+                place.description = description
+
+                # description 기반 tags 재생성
+                new_tags = self.tour_api._generate_rich_tags({
+                    "category":    place.category,
+                    "address":     place.address,
+                    "cat3":        place.cat3,
+                    "description": description,
+                })
+                if new_tags:
+                    place.tags = new_tags
+
+                await db.commit()
+                updated += 1
+
+                await asyncio.sleep(0.3)  # TourAPI rate limit 방지
+
+            except Exception as e:
+                await db.rollback()
+                errors += 1
+                print(f"[update_missing_data] 오류 place_id={place.id} name={place.name}: {e}")
+
+        return {
+            "success": True,
+            "processed": len(places),
+            "updated": updated,
+            "skipped_no_desc": skipped,
+            "errors": errors,
+            "remaining": max(0, remaining_before - updated),
+            "message": f"{updated}개 업데이트 완료. 남은 대상: {max(0, remaining_before - updated)}개"
         }
 
     async def get_collection_stats(self, db: AsyncSession) -> Dict[str, Any]:

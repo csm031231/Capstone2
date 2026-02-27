@@ -1,7 +1,6 @@
 import httpx
 import asyncio
 from typing import List, Optional, Dict, Any
-from datetime import datetime
 
 from core.config import get_config
 
@@ -505,8 +504,8 @@ class TourAPIService:
         result["cat3"] = item.get("cat3")
         result["readcount"] = int(item.get("readcount", 0)) if item.get("readcount") else None
 
-        # 상세 정보 병합
-        if detail:
+        # 상세 정보 병합 (빈 dict {}도 처리되도록 is not None 체크)
+        if detail is not None:
             # 설명
             result["description"] = self._clean_html(detail.get("overview", ""))
 
