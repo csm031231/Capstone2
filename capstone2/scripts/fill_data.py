@@ -59,32 +59,50 @@ async def step1_collect_food():
 
 
 async def step2_collect_weak_regions():
-    """경북/경남/전남 관광지+문화시설 보완"""
-    areas = ["경북", "경남", "전남"]
+    """데이터 부족 지역 보완 수집
+
+    실제 현황 (2026-02-28 기준):
+    - 충청북도: 0개   → 긴급 수집
+    - 충청남도: 1개   → 긴급 수집
+    - 울산:     3개   → 긴급 수집
+    - 대전:    10개   → 긴급 수집
+    - 대구:   141개   → 보완 수집
+    - 광주:   180개   → 보완 수집
+    """
+    # (지역 이름, TourAPI area_code에서 사용하는 키)
+    areas = [
+        "충북",   # 충청북도 → 0개
+        "충남",   # 충청남도 → 1개
+        "울산",   # 울산     → 3개
+        "대전",   # 대전     → 10개
+        "대구",   # 대구     → 141개
+        "광주",   # 광주     → 180개
+    ]
     collector = get_collector_service()
     total = 0
 
     log("=" * 50)
-    log("STEP 2: 부족 지역 관광지 보완 수집")
+    log("STEP 2: 부족 지역 데이터 보완 수집")
     log("=" * 50)
 
     for area in areas:
-        try:
-            async with database.DBSessionLocal() as session:
-                result = await collector.collect_places_by_area(
-                    db=session,
-                    area_name=area,
-                    content_types=["관광지", "문화시설"],
-                    max_items_per_type=300,
-                    enhance_with_wiki=False
-                )
-                collected = result.get("collected", 0)
-                skipped  = result.get("skipped", 0)
-                total += collected
-                log(f"  [{area}] 신규: {collected}개, 스킵: {skipped}개")
-        except Exception as e:
-            log(f"  [{area}] 오류: {e}")
-        await asyncio.sleep(2)
+        for content_type in ["관광지", "문화시설", "음식점"]:
+            try:
+                async with database.DBSessionLocal() as session:
+                    result = await collector.collect_places_by_area(
+                        db=session,
+                        area_name=area,
+                        content_types=[content_type],
+                        max_items_per_type=300,
+                        enhance_with_wiki=False
+                    )
+                    collected = result.get("collected", 0)
+                    skipped  = result.get("skipped", 0)
+                    total += collected
+                    log(f"  [{area}][{content_type}] 신규: {collected}개, 스킵: {skipped}개")
+            except Exception as e:
+                log(f"  [{area}][{content_type}] 오류: {e}")
+            await asyncio.sleep(2)
 
     log(f"STEP 2 완료 - 총 신규 {total}개 추가\n")
     return total
@@ -163,13 +181,13 @@ async def main():
     init_db(config)
     log("DB 연결 완료\n")
 
-    # STEP 1: 음식점 수집
+    # STEP 1: 음식점 수집 (이미 9,456개 있으므로 대부분 스킵될 것)
     await step1_collect_food()
 
-    # STEP 2: 부족 지역 보완
+    # STEP 2: 부족 지역 보완 (충북 0→수집, 충남 1→수집, 울산 3→수집, 대전 10→수집, 대구/광주 보완)
     await step2_collect_weak_regions()
 
-    # STEP 3: description 업데이트
+    # STEP 3: description 업데이트 (17,861개 대상)
     await step3_update_descriptions()
 
     log("=" * 50)

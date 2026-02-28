@@ -246,7 +246,8 @@ class PlannerService:
         candidates: List[dict],
         request: GenerateRequest,
         preference: Optional[UserPreference],
-        total_days: int
+        total_days: int,
+        user_requirements: str = ""
     ) -> dict:
         """GPT로 일정 초안 생성 (파싱 실패 시 최대 2회 재시도)"""
         # 장소 정보 문자열화 (must_visit 장소는 무조건 포함되도록)
@@ -259,6 +260,12 @@ class PlannerService:
         must_visit = [
             c['name'] for c in candidates if c.get('must_visit')
         ]
+
+        # 추가 요구사항 섹션 (chat 재생성 시 사용)
+        user_req_section = (
+            f"\n## 사용자 추가 요구사항 (최우선 반영)\n{user_requirements}\n"
+            if user_requirements else ""
+        )
 
         prompt = f"""당신은 여행 일정 전문가입니다. 아래 조건에 맞는 {total_days}일 여행 일정을 생성해주세요.
 
@@ -290,7 +297,7 @@ class PlannerService:
    - 저녁 식사(18:30~19:30) 이후에도 반드시 야경 또는 야간 명소 1개를 추가하여 일정이 22:00까지 이어지도록 하세요
    - 자연/공원 장소는 하루 최대 2개로 제한하세요
 10. 같은 place_id를 여러 날에 중복 사용하지 마세요. 각 장소는 전체 일정에서 한 번만 등장해야 합니다
-
+{user_req_section}
 ## 응답 형식 (JSON만 출력)
 {{
   "days": [

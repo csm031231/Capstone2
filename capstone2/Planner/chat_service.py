@@ -33,12 +33,20 @@ class ChatService:
 - replace: 장소 교체
 - reorder: 순서/일차 변경
 - modify: 시간/메모 수정
+- regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
+  (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
+- optimize_route: 현재 장소는 유지하고 이동 동선만 최적화
 - question: 추가 정보 필요
+
+## 언제 어떤 액션을 쓸지 판단 기준
+- 특정 장소 하나를 추가/제거/교체/순서변경/시간수정 → add/remove/replace/reorder/modify
+- "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
+- "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
 
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|modify|question",
+  "action_type": "add|remove|replace|reorder|modify|regenerate|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -55,7 +63,7 @@ class ChatService:
 ## 예시 요청과 응답
 
 사용자: "2일차에 카페 하나 넣어줘"
-응답: {"action_type": "add", "changes": [{"action": "add", "category": "카페", "day_number": 2}], "response_message": "2일차에 카페를 추가할게요. 특별히 원하는 분위기나 지역이 있나요?", "needs_confirmation": true}
+응답: {"action_type": "add", "changes": [{"action": "add", "category": "카페", "day_number": 2}], "response_message": "2일차에 카페를 추가할게요!", "needs_confirmation": false}
 
 사용자: "감천문화마을 빼줘"
 응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "감천문화마을"}], "response_message": "감천문화마을을 일정에서 제거했어요.", "needs_confirmation": false}
@@ -64,7 +72,22 @@ class ChatService:
 응답: {"action_type": "reorder", "changes": [{"action": "reorder", "place_name": "해운대해수욕장", "day_number": 1, "new_order": 1}], "response_message": "해운대해수욕장을 1일차 첫 번째로 이동했어요.", "needs_confirmation": false}
 
 사용자: "해운대 체류시간 2시간으로 바꿔줘"
-응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "해운대해수욕장", "stay_duration": 120}], "response_message": "해운대해수욕장 체류시간을 2시간으로 변경했어요.", "needs_confirmation": false}"""
+응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "해운대해수욕장", "stay_duration": 120}], "response_message": "해운대해수욕장 체류시간을 2시간으로 변경했어요.", "needs_confirmation": false}
+
+사용자: "힐링 테마로 전체 다시 짜줘"
+응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["힐링", "자연"], "requirements": "힐링·자연 위주, 복잡한 도심보다 조용한 명소"}], "response_message": "전체 일정을 힐링 테마로 새로 구성할게요!", "needs_confirmation": false}
+
+사용자: "2일차를 쇼핑 위주로 바꿔줘"
+응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": 2, "themes": ["쇼핑"], "requirements": "쇼핑·맛집 위주로 배치"}], "response_message": "2일차를 쇼핑 중심으로 재구성할게요!", "needs_confirmation": false}
+
+사용자: "야경 명소 많이 넣어서 처음부터 다시"
+응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["야경"], "requirements": "야경 명소를 저녁 이후 반드시 포함, 야간 관광 위주"}], "response_message": "야경 위주로 전체 일정을 새로 만들게요!", "needs_confirmation": false}
+
+사용자: "동선이 너무 비효율적이야, 최적화해줘"
+응답: {"action_type": "optimize_route", "changes": [{"action": "optimize_route"}], "response_message": "이동 동선을 최적화할게요!", "needs_confirmation": false}
+
+사용자: "맛집 더 넣어줘"
+응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
@@ -461,6 +484,16 @@ class ChatService:
                     if result:
                         applied_changes.append(result)
 
+                elif action == "regenerate":
+                    result = await self._apply_regenerate(db, user_id, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
+                elif action == "optimize_route":
+                    result = await self._apply_optimize_route(db, user_id, trip)
+                    if result:
+                        applied_changes.append(result)
+
             except Exception as e:
                 logger.error(f"변경 사항 적용 실패 ({action}): {e}")
 
@@ -633,6 +666,205 @@ class ChatService:
             )
             return {"action": "modify", "place_name": target.place.name, **update_data}
         return None
+
+    async def _apply_regenerate(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip,
+        change: dict
+    ) -> Optional[dict]:
+        """일정 전체 또는 특정 일차 재생성"""
+        from datetime import timedelta
+        from sqlalchemy import delete as sa_delete
+        from core.models import Itinerary as ItineraryModel
+        from Planner.dto import GenerateRequest
+        from Planner.planner_service import get_planner_service
+        from Recommend.preference_service import get_user_preference
+
+        scope = change.get("scope", "full")
+        themes = change.get("themes", [])
+        requirements = change.get("requirements", "")
+
+        conditions = trip.conditions or {}
+        merged_themes = themes or conditions.get("themes", [])
+
+        preference = await get_user_preference(db, user_id)
+        planner = get_planner_service()
+        total_days = (trip.end_date - trip.start_date).days + 1
+
+        # 특정 일차 vs 전체 판단
+        day_scope = None
+        if scope != "full" and scope is not None:
+            try:
+                day_scope = int(scope)
+            except (ValueError, TypeError):
+                pass
+
+        if day_scope is not None:
+            # ── 특정 일차 재생성 ──
+            other_place_ids = [
+                it.place_id for it in trip.itineraries
+                if it.day_number != day_scope
+            ]
+            target_date = trip.start_date + timedelta(days=day_scope - 1)
+
+            request = GenerateRequest(
+                title=trip.title,
+                region=trip.region,
+                start_date=target_date,
+                end_date=target_date,
+                themes=merged_themes,
+                max_places_per_day=conditions.get("max_places_per_day", 10),
+                exclude_places=other_place_ids,
+            )
+
+            candidates = await planner._gather_candidates(db, request, preference, 1)
+            if not candidates:
+                return None
+
+            draft = await planner._generate_with_gpt(
+                candidates, request, preference, 1, user_requirements=requirements
+            )
+            place_dict = {c['place_id']: c for c in candidates}
+            places_by_day = planner._build_places_by_day(draft, place_dict)
+            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
+            constrained, _ = planner.time_service.apply_constraints(
+                optimized, preference, target_date
+            )
+
+            # 해당 일차 기존 itineraries 삭제
+            await db.execute(
+                sa_delete(ItineraryModel).where(
+                    ItineraryModel.trip_id == trip.id,
+                    ItineraryModel.day_number == day_scope
+                )
+            )
+            await db.flush()
+
+            # 새 itineraries 삽입 (GPT day=1 → 실제 day_scope로 매핑)
+            itinerary_items = []
+            for _, places in constrained.items():
+                for place in places:
+                    itinerary_items.append({
+                        "place_id": place["place_id"],
+                        "day_number": day_scope,
+                        "order_index": place.get("order_index", 1),
+                        "arrival_time": place.get("suggested_arrival_time"),
+                        "stay_duration": place.get("suggested_stay_duration"),
+                        "travel_time_from_prev": place.get("travel_time_from_prev"),
+                        "transport_mode": place.get("transport_mode"),
+                        "memo": place.get("selection_reason"),
+                    })
+
+            await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
+            return {"action": "regenerate", "scope": f"{day_scope}일차 재생성"}
+
+        else:
+            # ── 전체 재생성 ──
+            request = GenerateRequest(
+                title=trip.title,
+                region=trip.region,
+                start_date=trip.start_date,
+                end_date=trip.end_date,
+                themes=merged_themes,
+                max_places_per_day=conditions.get("max_places_per_day", 10),
+            )
+
+            candidates = await planner._gather_candidates(db, request, preference, total_days)
+            if not candidates:
+                return None
+
+            draft = await planner._generate_with_gpt(
+                candidates, request, preference, total_days, user_requirements=requirements
+            )
+            place_dict = {c['place_id']: c for c in candidates}
+            places_by_day = planner._build_places_by_day(draft, place_dict)
+            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
+            constrained, _ = planner.time_service.apply_constraints(
+                optimized, preference, trip.start_date
+            )
+
+            # 모든 기존 itineraries 삭제
+            await db.execute(
+                sa_delete(ItineraryModel).where(ItineraryModel.trip_id == trip.id)
+            )
+            await db.flush()
+
+            # 새 itineraries 삽입
+            itinerary_items = []
+            for day_num, places in constrained.items():
+                for place in places:
+                    itinerary_items.append({
+                        "place_id": place["place_id"],
+                        "day_number": day_num,
+                        "order_index": place.get("order_index", 1),
+                        "arrival_time": place.get("suggested_arrival_time"),
+                        "stay_duration": place.get("suggested_stay_duration"),
+                        "travel_time_from_prev": place.get("travel_time_from_prev"),
+                        "transport_mode": place.get("transport_mode"),
+                        "memo": place.get("selection_reason"),
+                    })
+
+            await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
+
+            # themes가 변경된 경우 trip.conditions 업데이트
+            if themes:
+                from sqlalchemy import update as sa_update
+                from core.models import Trip as TripModel
+                new_conditions = {**conditions, "themes": themes}
+                await db.execute(
+                    sa_update(TripModel)
+                    .where(TripModel.id == trip.id)
+                    .values(conditions=new_conditions)
+                )
+                await db.commit()
+
+            return {"action": "regenerate", "scope": "전체 재생성"}
+
+    async def _apply_optimize_route(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip
+    ) -> Optional[dict]:
+        """현재 장소 유지 + 동선만 최적화"""
+        from Planner.route_optimizer import get_route_optimizer
+        from Trip.dto import ItineraryReorderItem
+
+        if not trip.itineraries:
+            return None
+
+        places_by_day = {}
+        for it in trip.itineraries:
+            day = it.day_number
+            if day not in places_by_day:
+                places_by_day[day] = []
+            places_by_day[day].append({
+                "itinerary_id": it.id,
+                "place_id": it.place_id,
+                "place_name": it.place.name,
+                "latitude": it.place.latitude,
+                "longitude": it.place.longitude,
+                "order_index": it.order_index,
+            })
+
+        optimizer = get_route_optimizer()
+        optimized = await optimizer.optimize(places_by_day, None, None)
+
+        reorder_items = []
+        for day, places in optimized.items():
+            for place in places:
+                reorder_items.append(
+                    ItineraryReorderItem(
+                        id=place["itinerary_id"],
+                        day_number=day,
+                        order_index=place["order_index"]
+                    )
+                )
+
+        await trip_crud.reorder_itineraries(db, trip.id, reorder_items)
+        return {"action": "optimize_route"}
 
     async def get_chat_history(
         self,
