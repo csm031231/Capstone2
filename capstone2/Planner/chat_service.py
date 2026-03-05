@@ -42,6 +42,8 @@ class ChatService:
 - 특정 장소 하나를 추가/제거/교체/순서변경/시간수정 → add/remove/replace/reorder/modify
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
+- "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
+- 요청이 너무 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true로 설정하고 response_message에서 선호도를 되물어봄
 
 ## 응답 형식 (JSON만 출력)
 {
@@ -60,6 +62,22 @@ class ChatService:
   "confirmation_question": null
 }
 
+## replace 액션의 상세 필드
+replace 액션에는 다음 필드를 최대한 채우세요:
+{
+  "action": "replace",
+  "day_number": 2,
+  "source_place_id": 456,           // 현재 일정에서 뺄 장소의 ID (현재 일정 목록에서 찾아 매핑)
+  "old_place": "뺄 장소명",          // 뺄 장소명 (ID 보조용)
+  "target_category": "카페",         // 넣을 장소의 카테고리 (특정 장소 미지정 시)
+  "target_search_keyword": "스타벅스 해운대점"  // 사용자가 특정 장소를 지목한 경우 검색 키워드
+}
+
+## needs_confirmation 활용 가이드
+- 사용자가 "아무 카페나", "맛집 하나", "뭔가 추가해줘"처럼 기준이 없는 요청을 하면 needs_confirmation: true 설정
+- response_message에서 구체적 선호도를 되물어봄 (예: "어떤 분위기의 카페를 원하세요? 뷰가 좋은 곳, 디저트 전문점, 조용한 분위기 중 선택해 주세요")
+- 단, 카테고리+일차가 명확하면 바로 처리 (needs_confirmation: false)
+
 ## 예시 요청과 응답
 
 사용자: "2일차에 카페 하나 넣어줘"
@@ -68,11 +86,20 @@ class ChatService:
 사용자: "감천문화마을 빼줘"
 응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "감천문화마을"}], "response_message": "감천문화마을을 일정에서 제거했어요.", "needs_confirmation": false}
 
+사용자: "2일차 카페를 스타벅스 해운대점으로 바꿔줘"
+응답: {"action_type": "replace", "changes": [{"action": "replace", "day_number": 2, "source_place_id": null, "old_place": null, "target_category": "카페", "target_search_keyword": "스타벅스 해운대점"}], "response_message": "2일차 카페를 스타벅스 해운대점으로 교체할게요!", "needs_confirmation": false}
+
 사용자: "1일차 순서 바꿔줘, 해운대 먼저"
 응답: {"action_type": "reorder", "changes": [{"action": "reorder", "place_name": "해운대해수욕장", "day_number": 1, "new_order": 1}], "response_message": "해운대해수욕장을 1일차 첫 번째로 이동했어요.", "needs_confirmation": false}
 
 사용자: "해운대 체류시간 2시간으로 바꿔줘"
 응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "해운대해수욕장", "stay_duration": 120}], "response_message": "해운대해수욕장 체류시간을 2시간으로 변경했어요.", "needs_confirmation": false}
+
+사용자: "일정이 너무 빡세"
+응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "가장 덜 중요한 장소명"}], "response_message": "일정이 빡빡하군요! 덜 중요한 장소를 제거해서 여유를 드릴게요.", "needs_confirmation": false}
+
+사용자: "걷기 힘들어, 쉬고 싶어"
+응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "체류 시간이 짧은 장소명", "stay_duration": 90}], "response_message": "체류 시간을 늘려서 여유롭게 쉬실 수 있도록 조정할게요.", "needs_confirmation": false}
 
 사용자: "힐링 테마로 전체 다시 짜줘"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["힐링", "자연"], "requirements": "힐링·자연 위주, 복잡한 도심보다 조용한 명소"}], "response_message": "전체 일정을 힐링 테마로 새로 구성할게요!", "needs_confirmation": false}
@@ -87,7 +114,10 @@ class ChatService:
 응답: {"action_type": "optimize_route", "changes": [{"action": "optimize_route"}], "response_message": "이동 동선을 최적화할게요!", "needs_confirmation": false}
 
 사용자: "맛집 더 넣어줘"
-응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}"""
+응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}
+
+사용자: "카페 추가해줘"
+응답: {"action_type": "add", "changes": [], "response_message": "어떤 분위기의 카페를 원하세요? 예를 들어 뷰가 좋은 곳, 디저트가 맛있는 곳, 조용한 분위기 중 어떤 걸 선호하세요?", "needs_confirmation": true, "confirmation_question": "카페 분위기 선호도를 알려주세요"}"""
 
     def __init__(self):
         config = get_config()
@@ -308,7 +338,7 @@ class ChatService:
         collected: List[Place] = []
         seen_ids: set = set()
 
-        # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 30개)
+        # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
             for cat in categories:
                 query = select(Place)
@@ -318,7 +348,7 @@ class ChatService:
                     query
                     .where(Place.category == cat)
                     .order_by(nulls_last(Place.readcount.desc()))
-                    .limit(30)
+                    .limit(20)
                 )
                 result = await db.execute(query)
                 for p in result.scalars().all():
@@ -326,33 +356,33 @@ class ChatService:
                         collected.append(p)
                         seen_ids.add(p.id)
 
-        # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 100개)
-        if len(collected) < 50:
+        # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 50개 → 토큰 절약)
+        if len(collected) < 30:
             query = select(Place)
             if trip.region:
                 query = query.where(Place.address.contains(trip.region))
             query = (
                 query
                 .order_by(nulls_last(Place.readcount.desc()))
-                .limit(100)
+                .limit(50)
             )
             result = await db.execute(query)
             for p in result.scalars().all():
                 if p.id not in seen_ids:
                     collected.append(p)
                     seen_ids.add(p.id)
-                if len(collected) >= 100:
+                if len(collected) >= 50:
                     break
 
         return collected
 
     def _format_available_places(self, places: List[Place]) -> str:
-        """추가 가능한 장소 포맷팅 (최대 50개 GPT 전달)"""
+        """추가 가능한 장소 포맷팅 (최대 30개 GPT 전달 → 토큰 절약)"""
         if not places:
             return "추가 가능한 장소가 없습니다."
 
         lines = []
-        for p in places[:50]:
+        for p in places[:30]:
             tags = ', '.join(p.tags[:2]) if p.tags else ''
             lines.append(f"- {p.name} ({p.category}) [ID: {p.id}] {tags}")
 
@@ -390,7 +420,7 @@ class ChatService:
         name: str,
         places: List[Place]
     ) -> Optional[Place]:
-        """장소명으로 정확한 매칭 (부분매칭 개선)"""
+        """장소명으로 매칭 (정확 → 포함 → 토큰 교집합 순으로 폴백)"""
         if not name:
             return None
 
@@ -412,6 +442,23 @@ class ChatService:
                     best_len_diff = diff
                     best_match = p
 
+        if best_match:
+            return best_match
+
+        # 3. 토큰 교집합 매칭 (예: "감천마을" → "감천문화마을" 매칭)
+        # 2글자 이상 한글 단어를 토큰으로 분리하여 교집합이 가장 큰 장소 선택
+        import re as _re
+        query_tokens = set(_re.findall(r'[가-힣]{2,}', name_lower))
+        if query_tokens:
+            best_score = 0
+            for p in places:
+                place_tokens = set(_re.findall(r'[가-힣]{2,}', p.name.lower()))
+                intersection = query_tokens & place_tokens
+                score = len(intersection) / max(len(query_tokens), 1)
+                if score > best_score and score >= 0.5:
+                    best_score = score
+                    best_match = p
+
         return best_match
 
     def _find_itinerary_by_name(
@@ -419,7 +466,7 @@ class ChatService:
         name: str,
         itineraries: List[Itinerary]
     ) -> Optional[Itinerary]:
-        """일정에서 장소명으로 Itinerary 찾기"""
+        """일정에서 장소명으로 Itinerary 찾기 (정확 → 포함 → 토큰 교집합 폴백)"""
         if not name:
             return None
 
@@ -439,6 +486,22 @@ class ChatService:
                 diff = abs(len(pname) - len(name_lower))
                 if diff < best_len_diff:
                     best_len_diff = diff
+                    best_match = it
+
+        if best_match:
+            return best_match
+
+        # 3. 토큰 교집합 매칭 (예: "감천마을" → "감천문화마을")
+        import re as _re
+        query_tokens = set(_re.findall(r'[가-힣]{2,}', name_lower))
+        if query_tokens:
+            best_score = 0
+            for it in itineraries:
+                place_tokens = set(_re.findall(r'[가-힣]{2,}', it.place.name.lower()))
+                intersection = query_tokens & place_tokens
+                score = len(intersection) / max(len(query_tokens), 1)
+                if score > best_score and score >= 0.5:
+                    best_score = score
                     best_match = it
 
         return best_match
@@ -570,15 +633,59 @@ class ChatService:
     async def _apply_replace(
         self, db, trip, change, available_places, place_id_dict
     ) -> Optional[dict]:
-        """장소 교체"""
-        old_it = self._find_itinerary_by_name(
-            change.get("old_place", ""), trip.itineraries
-        )
-        new_place = self._find_place_by_name(
-            change.get("new_place", ""), available_places
-        )
+        """장소 교체 (source_place_id / target_search_keyword 지원)"""
+        # ── 뺄 장소(old) 찾기 ──
+        old_it = None
+
+        # source_place_id로 직접 매핑 (가장 정확)
+        if change.get("source_place_id"):
+            for it in trip.itineraries:
+                if it.place_id == change["source_place_id"]:
+                    old_it = it
+                    break
+
+        # old_place 이름으로 폴백
+        if not old_it:
+            old_it = self._find_itinerary_by_name(
+                change.get("old_place", ""), trip.itineraries
+            )
+
+        # day_number + target_category 기반 폴백 (카테고리로 해당 날 장소 찾기)
+        if not old_it and change.get("day_number") and change.get("target_category"):
+            day = change["day_number"]
+            cat = change["target_category"]
+            for it in trip.itineraries:
+                if it.day_number == day and it.place.category and cat in it.place.category:
+                    old_it = it
+                    break
+
+        # ── 넣을 장소(new) 찾기 ──
+        new_place = None
+
+        # target_search_keyword: 검색 키워드로 available_places에서 찾기
+        if change.get("target_search_keyword"):
+            new_place = self._find_place_by_name(
+                change["target_search_keyword"], available_places
+            )
+
+        # new_place 이름으로 폴백
+        if not new_place:
+            new_place = self._find_place_by_name(
+                change.get("new_place", ""), available_places
+            )
+
+        # place_id로 직접 매핑
         if not new_place and change.get("place_id"):
             new_place = place_id_dict.get(change["place_id"])
+
+        # target_category로 폴백 (카테고리 내 첫 번째 미사용 장소)
+        if not new_place and change.get("target_category"):
+            existing_ids = {it.place_id for it in trip.itineraries}
+            cat = change["target_category"]
+            for p in available_places:
+                if p.id not in existing_ids and p.category and cat in p.category:
+                    new_place = p
+                    break
 
         if old_it and new_place:
             from Trip.dto import ItineraryUpdate
