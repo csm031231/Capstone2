@@ -150,6 +150,76 @@ def _extract_themes_from_scene(scene_types: List[str]) -> List[str]:
     return themes
 
 
+async def _find_landmark_place_id(
+    db: AsyncSession,
+    landmark_name: str,
+    region: str
+) -> Optional[int]:
+    """
+    사진에서 감지된 랜드마크명으로 Place ID 반환.
+    1) DB 정확 매칭 → 2) DB 토큰 LIKE 검색 → 3) TourAPI 키워드 검색 후 DB 자동 저장
+    """
+    if not landmark_name:
+        return None
+
+    from sqlalchemy import select as _select
+    from core.models import Place as PlaceModel
+    import re as _re
+
+    # ── 1. DB 정확 매칭 ──
+    q = _select(PlaceModel).where(PlaceModel.name == landmark_name)
+    if region:
+        q = q.where(PlaceModel.address.contains(region))
+    result = await db.execute(q)
+    place = result.scalar_one_or_none()
+    if place:
+        return place.id
+
+    # ── 2. DB 토큰 LIKE 검색 (가장 긴 한글 토큰 우선) ──
+    tokens = sorted(
+        _re.findall(r'[가-힣]{2,}', landmark_name),
+        key=len, reverse=True
+    )
+    for token in tokens[:3]:
+        q = _select(PlaceModel).where(PlaceModel.name.contains(token))
+        if region:
+            q = q.where(PlaceModel.address.contains(region))
+        q = q.limit(1)
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place.id
+
+    # ── 3. DB에 없으면 TourAPI로 검색 후 자동 저장 ──
+    try:
+        from DataCollector.collector_service import DataCollectorService
+        collector = DataCollectorService()
+        # AREA_CODE 매핑에 맞게 지역명 정규화 (예: "서울특별시" → "서울")
+        normalized_region = _normalize_region(region) if region else None
+        await collector.collect_by_keyword(
+            db=db,
+            keyword=landmark_name,
+            area_name=normalized_region,
+            max_items=3,          # 상위 3개만 저장 (빠르게)
+            enhance_with_wiki=False  # 속도 우선, 설명 보강 생략
+        )
+
+        # 저장 후 다시 검색 (토큰 매칭)
+        for token in ([landmark_name] + tokens[:2]):
+            q = _select(PlaceModel).where(PlaceModel.name.contains(token))
+            if region:
+                q = q.where(PlaceModel.address.contains(region))
+            q = q.order_by(PlaceModel.readcount.desc()).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place.id
+    except Exception:
+        pass  # TourAPI 실패해도 일정 생성은 계속 진행
+
+    return None
+
+
 @router.post("/generate-with-photo", response_model=GenerateWithPhotoResponse)
 async def generate_with_photo(
     request: GenerateWithPhotoRequest,
@@ -206,13 +276,20 @@ async def generate_with_photo(
             if t not in merged_themes:
                 merged_themes.append(t)
 
+    # 사진 랜드마크 → must_visit_places 우선 추가
+    must_visit = list(request.must_visit_places)
+    if request.photo_landmark:
+        landmark_id = await _find_landmark_place_id(db, request.photo_landmark, request.region)
+        if landmark_id and landmark_id not in must_visit:
+            must_visit.insert(0, landmark_id)
+
     # 기존 GenerateRequest로 변환하여 일정 생성
     generate_request = GenerateRequest(
         title=request.title,
         region=request.region,
         start_date=request.start_date,
         end_date=request.end_date,
-        must_visit_places=request.must_visit_places,
+        must_visit_places=must_visit,
         exclude_places=request.exclude_places,
         themes=merged_themes,
         max_places_per_day=request.max_places_per_day,
@@ -344,13 +421,20 @@ async def generate_with_photo_upload(
             if t not in merged_themes:
                 merged_themes.append(t)
 
+    # 사진 랜드마크 → must_visit_places 우선 추가
+    must_visit = list(must_visit_list)
+    if photo_landmark:
+        landmark_id = await _find_landmark_place_id(db, photo_landmark, region)
+        if landmark_id and landmark_id not in must_visit:
+            must_visit.insert(0, landmark_id)
+
     # 일정 생성
     generate_request = GenerateRequest(
         title=title,
         region=region,
         start_date=start_date,
         end_date=end_date,
-        must_visit_places=must_visit_list,
+        must_visit_places=must_visit,
         exclude_places=exclude_list,
         themes=merged_themes,
         max_places_per_day=max_places_per_day,

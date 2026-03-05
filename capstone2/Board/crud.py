@@ -94,6 +94,34 @@ async def get_posts(
     return items, total
 
 
+async def get_posts_by_user(
+    db: AsyncSession,
+    user_id: int,
+    skip: int = 0,
+    limit: int = 20,
+) -> tuple[List[TravelPost], int]:
+    """내가 쓴 글 목록 조회 (페이지네이션). (items, total) 반환"""
+    query = (
+        select(TravelPost)
+        .options(selectinload(TravelPost.user))
+        .where(TravelPost.user_id == user_id)
+        .order_by(TravelPost.created_at.desc())
+    )
+    count_query = (
+        select(func.count())
+        .select_from(TravelPost)
+        .where(TravelPost.user_id == user_id)
+    )
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    items_result = await db.execute(query.offset(skip).limit(limit))
+    items = items_result.scalars().all()
+
+    return items, total
+
+
 async def update_post(
     db: AsyncSession,
     post: TravelPost,
