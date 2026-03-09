@@ -198,7 +198,10 @@ async def create_comment(
 
     result = await db.execute(
         select(PostComment)
-        .options(selectinload(PostComment.user))
+        .options(
+            selectinload(PostComment.user),
+            selectinload(PostComment.replies).selectinload(PostComment.user),
+        )
         .where(PostComment.id == comment.id)
     )
     return result.scalar_one()
