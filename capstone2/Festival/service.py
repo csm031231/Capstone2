@@ -46,8 +46,19 @@ class FestivalService:
                 }
 
         # 2. 날짜 포맷 변환 (date -> YYYYMMDD)
-        event_start_date = request.start_date.strftime("%Y%m%d") if request.start_date else None
-        event_end_date = request.end_date.strftime("%Y%m%d") if request.end_date else None
+        # ⭐ 버그 수정: 날짜가 없으면 기본값 설정 (오늘 ~ 3개월 후)
+        start_date = request.start_date
+        end_date = request.end_date
+        
+        if not start_date or not end_date:
+            today = datetime.now().date()
+            if not start_date:
+                start_date = today
+            if not end_date:
+                end_date = today + timedelta(days=90)  # 기본 3개월 범위
+        
+        event_start_date = start_date.strftime("%Y%m%d") if start_date else None
+        event_end_date = end_date.strftime("%Y%m%d") if end_date else None
 
         # 3. TourAPI 호출
         festivals = []
@@ -137,8 +148,8 @@ class FestivalService:
             "total_count": len(festival_infos),
             "filters_applied": {
                 "region": request.region,
-                "start_date": request.start_date.isoformat() if request.start_date else None,
-                "end_date": request.end_date.isoformat() if request.end_date else None,
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None,
                 "keyword": request.keyword,
             },
             "message": f"{len(festival_infos)}개의 축제를 찾았습니다."
