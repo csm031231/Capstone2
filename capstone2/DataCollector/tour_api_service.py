@@ -163,13 +163,22 @@ class TourAPIService:
             t1 = asyncio.get_event_loop().time()
             print(f"DEBUG TourAPI.search_places: elapsed={(t1-t0):.3f}s endpoint={endpoint}")
 
-        items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        # 수정
+        if not isinstance(data, dict):
+            print(f"DEBUG tour_api search_places: unexpected data type={type(data)}, value={str(data)[:200]}")
+            return []
 
-        # 단일 항목인 경우 리스트로 변환
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+
+        if not isinstance(items_container, dict):
+            return []
+
+        items = items_container.get("item", [])
+
         if isinstance(items, dict):
             items = [items]
 
-        return items or []
+        return items if isinstance(items, list) else []
     
     async def search_festivals(
         self,

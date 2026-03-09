@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import date
 
@@ -12,6 +12,14 @@ class FestivalSearchRequest(BaseModel):
     end_date: Optional[date] = Field(None, description="행사 종료일 (이전)")
     keyword: Optional[str] = Field(None, description="축제명 검색 키워드")
     max_items: int = Field(default=50, ge=10, le=200, description="최대 결과 수")
+    
+    # ⭐ null 문자열도 None으로 변환 (프론트 관대한 처리)
+    @field_validator('start_date', 'end_date', mode='before')
+    @classmethod
+    def parse_dates(cls, v):
+        if v is None or v == 'null' or v == 'undefined' or v == '':
+            return None
+        return v
 
 
 # ==================== 축제 응답 DTOs ====================
