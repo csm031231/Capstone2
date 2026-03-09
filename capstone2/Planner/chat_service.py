@@ -31,7 +31,8 @@ class ChatService:
 - add: 새 장소 추가
 - remove: 기존 장소 제거
 - replace: 장소 교체
-- reorder: 순서/일차 변경
+- reorder: 특정 장소 하나의 순서/일차 변경
+- swap_days: 두 일차의 모든 장소를 통째로 교환 (day_a, day_b 필드 사용)
 - modify: 시간/메모 수정
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
@@ -40,6 +41,7 @@ class ChatService:
 
 ## 언제 어떤 액션을 쓸지 판단 기준
 - 특정 장소 하나를 추가/제거/교체/순서변경/시간수정 → add/remove/replace/reorder/modify
+- "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
 - "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
@@ -48,7 +50,7 @@ class ChatService:
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|modify|regenerate|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_days|modify|regenerate|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -109,6 +111,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
 사용자: "야경 명소 많이 넣어서 처음부터 다시"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["야경"], "requirements": "야경 명소를 저녁 이후 반드시 포함, 야간 관광 위주"}], "response_message": "야경 위주로 전체 일정을 새로 만들게요!", "needs_confirmation": false}
+
+사용자: "1일차랑 4일차 바꿔줘"
+응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 1, "day_b": 4}], "response_message": "1일차와 4일차를 통째로 교환할게요!", "needs_confirmation": false}
+
+사용자: "3일차와 5일차를 교환해줘"
+응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 3, "day_b": 5}], "response_message": "3일차와 5일차 일정을 서로 바꿀게요!", "needs_confirmation": false}
 
 사용자: "동선이 너무 비효율적이야, 최적화해줘"
 응답: {"action_type": "optimize_route", "changes": [{"action": "optimize_route"}], "response_message": "이동 동선을 최적화할게요!", "needs_confirmation": false}
@@ -243,7 +251,13 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         trip_id: int,
         session_id: Optional[int]
     ) -> ChatSession:
-        """세션 로드 또는 생성"""
+        """세션 로드 또는 생성
+
+        우선순위:
+        1) 명시적 session_id → 해당 세션 반환
+        2) session_id 없음 → 같은 trip의 최근 세션 재사용 (대화 맥락 유지)
+        3) 기존 세션 없음 → 새 세션 생성
+        """
         if session_id:
             result = await db.execute(
                 select(ChatSession).where(
@@ -255,7 +269,21 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             if session:
                 return session
 
-        # 새 세션 생성
+        # session_id가 없거나 찾지 못한 경우 → 같은 trip의 최근 세션 재사용
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.trip_id == trip_id
+            )
+            .order_by(ChatSession.id.desc())
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+
+        # 기존 세션 없으면 새로 생성
         session = ChatSession(
             user_id=user_id,
             trip_id=trip_id,
@@ -304,7 +332,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             time_str = it.arrival_time.strftime("%H:%M") if it.arrival_time else "미정"
             lines.append(
                 f"  {it.order_index}. {place.name} ({place.category}) "
-                f"[ID: {it.id}] - {time_str}"
+                f"[IID:{it.id} PID:{it.place_id}] - {time_str}"
             )
 
         return '\n'.join(lines)
@@ -411,11 +439,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 except json.JSONDecodeError:
                     pass
 
-            # 파싱 실패 시 기본 응답
+            # 파싱 실패 시 기본 응답 (원문 text는 JSON 코드일 수 있으므로 사용자에게 노출 금지)
             return {
                 "understood": False,
                 "action_type": "question",
-                "response_message": text,
+                "response_message": "요청을 처리하지 못했어요. 좀 더 구체적으로 말씀해 주시겠어요?",
                 "needs_confirmation": False
             }
 
@@ -622,6 +650,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     if result:
                         applied_changes.append(result)
 
+                elif action == "swap_days":
+                    result = await self._apply_swap_days(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
                 elif action == "optimize_route":
                     result = await self._apply_optimize_route(db, user_id, trip)
                     if result:
@@ -677,31 +710,59 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     place = p
                     break
 
-        if place:
-            from Trip.dto import ItineraryCreate
-            day = change.get("day_number", 1)
-            order = change.get("order_index", 99)
+        if not place:
+            return None
 
-            await trip_crud.create_itinerary(
-                db, trip.id,
-                ItineraryCreate(
-                    place_id=place.id,
-                    day_number=day,
-                    order_index=order
-                )
+        # 중복 장소 차단 — 이미 일정에 있으면 추가하지 않음
+        if place.id in existing_ids:
+            return None
+
+        from Trip.dto import ItineraryCreate
+
+        # day_number 미지정 시 → 장소 수가 가장 적은 날에 자동 배치
+        day = change.get("day_number")
+        if not day:
+            from collections import Counter
+            day_counts = Counter(it.day_number for it in trip.itineraries)
+            total_days = (trip.end_date - trip.start_date).days + 1
+            # 모든 일차를 대상으로 하되 기록 없는 날은 0으로 처리
+            day = min(range(1, total_days + 1), key=lambda d: day_counts.get(d, 0))
+
+        order = change.get("order_index", 99)
+
+        await trip_crud.create_itinerary(
+            db, trip.id,
+            ItineraryCreate(
+                place_id=place.id,
+                day_number=day,
+                order_index=order
             )
-            return {"action": "add", "place_name": place.name, "day_number": day}
-        return None
+        )
+        return {"action": "add", "place_name": place.name, "day_number": day}
 
     async def _apply_remove(self, db, trip, change) -> Optional[dict]:
-        """장소 제거"""
+        """장소 제거 후 같은 일차 order_index 재정렬"""
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
-        if target:
-            await trip_crud.delete_itinerary(db, target.id)
-            return {"action": "remove", "place_name": target.place.name}
-        return None
+        if not target:
+            return None
+
+        removed_day = target.day_number
+        removed_name = target.place.name
+        await trip_crud.delete_itinerary(db, target.id)
+
+        # 같은 날 남은 장소들을 1부터 연속 재정렬 (구멍 방지)
+        from Trip.dto import ItineraryUpdate
+        same_day = sorted(
+            [it for it in trip.itineraries if it.id != target.id and it.day_number == removed_day],
+            key=lambda x: x.order_index
+        )
+        for idx, it in enumerate(same_day, start=1):
+            if it.order_index != idx:
+                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+
+        return {"action": "remove", "place_name": removed_name}
 
     async def _apply_replace(
         self, db, trip, change, available_places, place_id_dict
@@ -1009,6 +1070,42 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 await db.commit()
 
             return {"action": "regenerate", "scope": "전체 재생성"}
+
+    async def _apply_swap_days(self, db, trip, change) -> Optional[dict]:
+        """두 일차의 모든 장소를 통째로 교환
+
+        충돌 방지를 위해 3단계로 처리:
+        1) day_a → temp(9999)
+        2) day_b → day_a
+        3) temp  → day_b
+        """
+        day_a = change.get("day_a")
+        day_b = change.get("day_b")
+
+        if not day_a or not day_b or day_a == day_b:
+            return None
+
+        from Trip.dto import ItineraryUpdate
+
+        TEMP_DAY = 9999
+
+        # 루프 중 in-memory day_number 변경이 꼬이지 않도록 ID만 미리 수집
+        day_a_ids = [it.id for it in trip.itineraries if it.day_number == day_a]
+        day_b_ids = [it.id for it in trip.itineraries if it.day_number == day_b]
+
+        if not day_a_ids and not day_b_ids:
+            return None
+
+        for iid in day_a_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=TEMP_DAY))
+
+        for iid in day_b_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=day_a))
+
+        for iid in day_a_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=day_b))
+
+        return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
 
     async def _apply_optimize_route(
         self,
