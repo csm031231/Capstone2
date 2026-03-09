@@ -872,44 +872,34 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         from Trip.dto import ItineraryUpdate
 
-        # 대상 장소를 먼저 원하는 day/order로 이동
-        await trip_crud.update_itinerary(
-            db, target.id,
-            ItineraryUpdate(day_number=new_day, order_index=new_order)
-        )
-
-        # 같은 날의 나머지 장소들을 충돌 없이 재정렬
-        same_day = sorted(
+        # DB 업데이트 전에 같은 날 장소 목록 및 시작 시간 미리 수집
+        same_day_snapshot = sorted(
             [it for it in trip.itineraries if it.day_number == new_day],
             key=lambda x: (x.order_index, x.id)
         )
+        first_time = next((it.arrival_time for it in same_day_snapshot if it.arrival_time is not None), None)
+        target_name = target.place.name
 
         # 대상 장소를 원하는 위치에 끼워넣고 나머지를 순서대로 밀어냄
-        others = [it for it in same_day if it.id != target.id]
-        # new_order 위치에 target을 삽입
+        others = [it for it in same_day_snapshot if it.id != target.id]
         insert_at = max(0, min(new_order - 1, len(others)))
         ordered = others[:insert_at] + [target] + others[insert_at:]
 
+        # 순서대로 order_index 적용
         for idx, it in enumerate(ordered, start=1):
-            if it.order_index != idx:
-                await trip_crud.update_itinerary(
-                    db, it.id,
-                    ItineraryUpdate(order_index=idx)
-                )
+            await trip_crud.update_itinerary(
+                db, it.id,
+                ItineraryUpdate(day_number=new_day, order_index=idx)
+            )
 
-        # 순서 변경 후 arrival_time 재계산 (첫 장소의 기존 시작 시간 기준)
-        first_time = None
-        for it in ordered:
-            if it.arrival_time is not None:
-                first_time = it.arrival_time
-                break
+        # 순서 변경 후 arrival_time 재계산
         start_h = first_time.hour if first_time else 9
         start_m = first_time.minute if first_time else 0
         await self._recalculate_day_times(db, ordered, start_hour=start_h, start_minute=start_m)
 
         return {
             "action": "reorder",
-            "place_name": target.place.name,
+            "place_name": target_name,
             "day_number": new_day,
             "order_index": new_order
         }
@@ -921,14 +911,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         from datetime import time as time_type
         from Trip.dto import ItineraryUpdate
 
+        if not ordered_itineraries:
+            return
+
         current_minutes = start_hour * 60 + start_minute
 
         for i, it in enumerate(ordered_itineraries):
-            # arrival_time이 없는 경우 건너뜀 (시간 정보 없는 일정)
-            if it.arrival_time is None and i == 0:
-                # 첫 장소도 arrival_time 없으면 재계산 불필요
-                break
-
             h, m = divmod(current_minutes, 60)
             if h >= 24:
                 h, m = 23, 59
@@ -1147,6 +1135,21 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         day_a = it_a.day_number
         day_b = it_b.day_number
 
+        # DB 업데이트 전에 각 일차의 전체 장소 목록 및 시작 시간 미리 수집
+        days_snapshot: dict[int, list] = {}
+        for day in {day_a, day_b}:
+            its = sorted(
+                [it for it in trip.itineraries if it.day_number == day],
+                key=lambda x: x.order_index
+            )
+            days_snapshot[day] = its
+
+        # 각 일차의 시작 시간 미리 저장
+        start_times: dict[int, tuple] = {}
+        for day, its in days_snapshot.items():
+            ft = next((it.arrival_time for it in its if it.arrival_time is not None), None)
+            start_times[day] = (ft.hour if ft else 9, ft.minute if ft else 0)
+
         # 순서만 맞교환 (일차도 다를 수 있으므로 day_number도 교환)
         await trip_crud.update_itinerary(
             db, it_a.id,
@@ -1157,20 +1160,28 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             ItineraryUpdate(day_number=day_a, order_index=order_a)
         )
 
-        # 영향받은 일차 arrival_time 재계산
-        affected_days = {day_a, day_b}
-        for day in affected_days:
-            day_its = sorted(
-                [it for it in trip.itineraries if it.day_number == day or
-                 (it.id == it_a.id and day_b == day) or
-                 (it.id == it_b.id and day_a == day)],
-                key=lambda x: x.order_index
-            )
-            if day_its:
-                first_time = next((it.arrival_time for it in day_its if it.arrival_time), None)
-                start_h = first_time.hour if first_time else 9
-                start_m = first_time.minute if first_time else 0
-                await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
+        # 영향받은 각 일차의 arrival_time 재계산
+        # swap 후 순서: snapshot 기반으로 it_a ↔ it_b 교환하여 직접 구성
+        for day in {day_a, day_b}:
+            its = days_snapshot[day]
+            # it_a가 이 날에 있었으면 it_b로 교체, it_b가 있었으면 it_a로 교체
+            new_its = []
+            for it in its:
+                if it.id == it_a.id:
+                    new_its.append(it_b)
+                elif it.id == it_b.id:
+                    new_its.append(it_a)
+                else:
+                    new_its.append(it)
+            # order_index 기준으로 재정렬 (swap 전 snapshot 순서 유지, id 기준 대체만)
+            new_its_sorted = sorted(new_its, key=lambda x: (
+                order_b if x.id == it_b.id and day == day_a else
+                order_a if x.id == it_a.id and day == day_b else
+                x.order_index
+            ))
+            if new_its_sorted:
+                sh, sm = start_times[day]
+                await self._recalculate_day_times(db, new_its_sorted, start_hour=sh, start_minute=sm)
 
         return {
             "action": "swap_places",
