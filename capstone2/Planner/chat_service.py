@@ -31,7 +31,8 @@ class ChatService:
 - add: 새 장소 추가
 - remove: 기존 장소 제거
 - replace: 장소 교체
-- reorder: 순서/일차 변경
+- reorder: 특정 장소 하나의 순서/일차 변경
+- swap_days: 두 일차의 모든 장소를 통째로 교환 (day_a, day_b 필드 사용)
 - modify: 시간/메모 수정
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
@@ -40,6 +41,7 @@ class ChatService:
 
 ## 언제 어떤 액션을 쓸지 판단 기준
 - 특정 장소 하나를 추가/제거/교체/순서변경/시간수정 → add/remove/replace/reorder/modify
+- "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
 - "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
@@ -48,7 +50,7 @@ class ChatService:
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|modify|regenerate|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_days|modify|regenerate|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -109,6 +111,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
 사용자: "야경 명소 많이 넣어서 처음부터 다시"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["야경"], "requirements": "야경 명소를 저녁 이후 반드시 포함, 야간 관광 위주"}], "response_message": "야경 위주로 전체 일정을 새로 만들게요!", "needs_confirmation": false}
+
+사용자: "1일차랑 4일차 바꿔줘"
+응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 1, "day_b": 4}], "response_message": "1일차와 4일차를 통째로 교환할게요!", "needs_confirmation": false}
+
+사용자: "3일차와 5일차를 교환해줘"
+응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 3, "day_b": 5}], "response_message": "3일차와 5일차 일정을 서로 바꿀게요!", "needs_confirmation": false}
 
 사용자: "동선이 너무 비효율적이야, 최적화해줘"
 응답: {"action_type": "optimize_route", "changes": [{"action": "optimize_route"}], "response_message": "이동 동선을 최적화할게요!", "needs_confirmation": false}
@@ -243,7 +251,13 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         trip_id: int,
         session_id: Optional[int]
     ) -> ChatSession:
-        """세션 로드 또는 생성"""
+        """세션 로드 또는 생성
+
+        우선순위:
+        1) 명시적 session_id → 해당 세션 반환
+        2) session_id 없음 → 같은 trip의 최근 세션 재사용 (대화 맥락 유지)
+        3) 기존 세션 없음 → 새 세션 생성
+        """
         if session_id:
             result = await db.execute(
                 select(ChatSession).where(
@@ -255,7 +269,21 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             if session:
                 return session
 
-        # 새 세션 생성
+        # session_id가 없거나 찾지 못한 경우 → 같은 trip의 최근 세션 재사용
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.trip_id == trip_id
+            )
+            .order_by(ChatSession.id.desc())
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+
+        # 기존 세션 없으면 새로 생성
         session = ChatSession(
             user_id=user_id,
             trip_id=trip_id,
@@ -275,12 +303,16 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         assistant_response: str
     ):
         """세션 히스토리 업데이트"""
+        from sqlalchemy.orm.attributes import flag_modified
+
         messages = session.messages or []
         messages.append({"role": "user", "content": user_message})
         messages.append({"role": "assistant", "content": assistant_response})
 
         # 최근 20개만 유지
         session.messages = messages[-20:]
+        # JSON 컬럼(list)의 내부 변경을 SQLAlchemy가 감지하도록 명시적으로 표시
+        flag_modified(session, "messages")
         await db.commit()
 
     def _format_itineraries(self, itineraries: List[Itinerary]) -> str:
@@ -300,7 +332,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             time_str = it.arrival_time.strftime("%H:%M") if it.arrival_time else "미정"
             lines.append(
                 f"  {it.order_index}. {place.name} ({place.category}) "
-                f"[ID: {it.id}] - {time_str}"
+                f"[IID:{it.id} PID:{it.place_id}] - {time_str}"
             )
 
         return '\n'.join(lines)
@@ -407,20 +439,86 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 except json.JSONDecodeError:
                     pass
 
-            # 파싱 실패 시 기본 응답
+            # 파싱 실패 시 기본 응답 (원문 text는 JSON 코드일 수 있으므로 사용자에게 노출 금지)
             return {
                 "understood": False,
                 "action_type": "question",
-                "response_message": text,
+                "response_message": "요청을 처리하지 못했어요. 좀 더 구체적으로 말씀해 주시겠어요?",
                 "needs_confirmation": False
             }
+
+    async def _search_place_in_db(
+        self,
+        db: AsyncSession,
+        name: str,
+        region: Optional[str] = None
+    ) -> Optional[Place]:
+        """DB에서 직접 장소 검색 — available_places 50개 안에 없을 때 폴백용.
+
+        통합검색(_get_places_by_hints)과의 차이:
+        - 통합검색은 인기순 상위 N개를 미리 불러와 GPT 컨텍스트로 제공
+        - 이 메서드는 사용자가 특정 장소명을 직접 지목했을 때 DB 전체를 대상으로 검색
+          → 인기도가 낮거나 새로 수집된 장소도 이름만 알면 찾을 수 있음
+        """
+        if not name:
+            return None
+
+        import re as _re
+        from sqlalchemy import nulls_last
+
+        # 1. 정확 매칭 (지역 필터 포함)
+        q = select(Place).where(Place.name == name)
+        if region:
+            q = q.where(Place.address.contains(region))
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 2. 포함 매칭 (지역 필터 포함, 인기순)
+        q = select(Place).where(Place.name.contains(name))
+        if region:
+            q = q.where(Place.address.contains(region))
+        q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 3. 포함 매칭 (지역 필터 없이 재시도 — 지역 표기가 달라도 찾을 수 있도록)
+        q = (
+            select(Place)
+            .where(Place.name.contains(name))
+            .order_by(nulls_last(Place.readcount.desc()))
+            .limit(1)
+        )
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 4. 한글 토큰 분리 후 가장 긴 토큰으로 검색
+        tokens = sorted(_re.findall(r'[가-힣]{2,}', name), key=len, reverse=True)
+        for token in tokens[:2]:
+            q = select(Place).where(Place.name.contains(token))
+            if region:
+                q = q.where(Place.address.contains(region))
+            q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place
+
+        return None
 
     def _find_place_by_name(
         self,
         name: str,
         places: List[Place]
     ) -> Optional[Place]:
-        """장소명으로 매칭 (정확 → 포함 → 토큰 교집합 순으로 폴백)"""
+        """장소명으로 매칭 (정확 → 포함 → 토큰 교집합 순으로 폴백)
+        available_places 리스트 안에서만 검색. DB 전체 검색은 _search_place_in_db 사용.
+        """
         if not name:
             return None
 
@@ -552,6 +650,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     if result:
                         applied_changes.append(result)
 
+                elif action == "swap_days":
+                    result = await self._apply_swap_days(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
                 elif action == "optimize_route":
                     result = await self._apply_optimize_route(db, user_id, trip)
                     if result:
@@ -593,6 +696,9 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         if change.get("place_name"):
             place = self._find_place_by_name(change["place_name"], available_places)
+            # available_places(상위 50개)에 없으면 DB 전체에서 직접 검색
+            if not place:
+                place = await self._search_place_in_db(db, change["place_name"], trip.region)
 
         if not place and change.get("place_id"):
             place = place_id_dict.get(change["place_id"])
@@ -604,31 +710,59 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     place = p
                     break
 
-        if place:
-            from Trip.dto import ItineraryCreate
-            day = change.get("day_number", 1)
-            order = change.get("order_index", 99)
+        if not place:
+            return None
 
-            await trip_crud.create_itinerary(
-                db, trip.id,
-                ItineraryCreate(
-                    place_id=place.id,
-                    day_number=day,
-                    order_index=order
-                )
+        # 중복 장소 차단 — 이미 일정에 있으면 추가하지 않음
+        if place.id in existing_ids:
+            return None
+
+        from Trip.dto import ItineraryCreate
+
+        # day_number 미지정 시 → 장소 수가 가장 적은 날에 자동 배치
+        day = change.get("day_number")
+        if not day:
+            from collections import Counter
+            day_counts = Counter(it.day_number for it in trip.itineraries)
+            total_days = (trip.end_date - trip.start_date).days + 1
+            # 모든 일차를 대상으로 하되 기록 없는 날은 0으로 처리
+            day = min(range(1, total_days + 1), key=lambda d: day_counts.get(d, 0))
+
+        order = change.get("order_index", 99)
+
+        await trip_crud.create_itinerary(
+            db, trip.id,
+            ItineraryCreate(
+                place_id=place.id,
+                day_number=day,
+                order_index=order
             )
-            return {"action": "add", "place_name": place.name, "day_number": day}
-        return None
+        )
+        return {"action": "add", "place_name": place.name, "day_number": day}
 
     async def _apply_remove(self, db, trip, change) -> Optional[dict]:
-        """장소 제거"""
+        """장소 제거 후 같은 일차 order_index 재정렬"""
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
-        if target:
-            await trip_crud.delete_itinerary(db, target.id)
-            return {"action": "remove", "place_name": target.place.name}
-        return None
+        if not target:
+            return None
+
+        removed_day = target.day_number
+        removed_name = target.place.name
+        await trip_crud.delete_itinerary(db, target.id)
+
+        # 같은 날 남은 장소들을 1부터 연속 재정렬 (구멍 방지)
+        from Trip.dto import ItineraryUpdate
+        same_day = sorted(
+            [it for it in trip.itineraries if it.id != target.id and it.day_number == removed_day],
+            key=lambda x: x.order_index
+        )
+        for idx, it in enumerate(same_day, start=1):
+            if it.order_index != idx:
+                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+
+        return {"action": "remove", "place_name": removed_name}
 
     async def _apply_replace(
         self, db, trip, change, available_places, place_id_dict
@@ -662,17 +796,25 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # ── 넣을 장소(new) 찾기 ──
         new_place = None
 
-        # target_search_keyword: 검색 키워드로 available_places에서 찾기
+        # target_search_keyword: 검색 키워드로 available_places에서 찾기 → 없으면 DB 직접 검색
         if change.get("target_search_keyword"):
             new_place = self._find_place_by_name(
                 change["target_search_keyword"], available_places
             )
+            if not new_place:
+                new_place = await self._search_place_in_db(
+                    db, change["target_search_keyword"], trip.region
+                )
 
         # new_place 이름으로 폴백
         if not new_place:
             new_place = self._find_place_by_name(
                 change.get("new_place", ""), available_places
             )
+            if not new_place and change.get("new_place"):
+                new_place = await self._search_place_in_db(
+                    db, change["new_place"], trip.region
+                )
 
         # place_id로 직접 매핑
         if not new_place and change.get("place_id"):
@@ -929,6 +1071,42 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
             return {"action": "regenerate", "scope": "전체 재생성"}
 
+    async def _apply_swap_days(self, db, trip, change) -> Optional[dict]:
+        """두 일차의 모든 장소를 통째로 교환
+
+        충돌 방지를 위해 3단계로 처리:
+        1) day_a → temp(9999)
+        2) day_b → day_a
+        3) temp  → day_b
+        """
+        day_a = change.get("day_a")
+        day_b = change.get("day_b")
+
+        if not day_a or not day_b or day_a == day_b:
+            return None
+
+        from Trip.dto import ItineraryUpdate
+
+        TEMP_DAY = 9999
+
+        # 루프 중 in-memory day_number 변경이 꼬이지 않도록 ID만 미리 수집
+        day_a_ids = [it.id for it in trip.itineraries if it.day_number == day_a]
+        day_b_ids = [it.id for it in trip.itineraries if it.day_number == day_b]
+
+        if not day_a_ids and not day_b_ids:
+            return None
+
+        for iid in day_a_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=TEMP_DAY))
+
+        for iid in day_b_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=day_a))
+
+        for iid in day_a_ids:
+            await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=day_b))
+
+        return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
+
     async def _apply_optimize_route(
         self,
         db: AsyncSession,
@@ -979,12 +1157,33 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         user_id: int,
         session_id: int
     ) -> Optional[ChatSession]:
-        """대화 히스토리 조회"""
+        """대화 히스토리 조회 (session_id 기반)"""
         result = await db.execute(
             select(ChatSession).where(
                 ChatSession.id == session_id,
                 ChatSession.user_id == user_id
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_latest_session_by_trip(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip_id: int
+    ) -> Optional[ChatSession]:
+        """특정 여행의 가장 최근 채팅 세션 조회 (trip_id 기반)
+
+        프론트엔드에서 session_id를 저장하지 않았을 때 대화를 이어가기 위해 사용.
+        """
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.trip_id == trip_id
+            )
+            .order_by(ChatSession.id.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
