@@ -515,7 +515,7 @@ async def get_chat_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(provide_session)
 ):
-    """대화 히스토리 조회"""
+    """대화 히스토리 조회 (session_id 기반)"""
     chat_service = get_chat_service()
     session = await chat_service.get_chat_history(db, current_user.id, session_id)
 
@@ -523,6 +523,45 @@ async def get_chat_history(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="채팅 세션을 찾을 수 없습니다"
+        )
+
+    return ChatHistoryResponse(
+        session_id=session.id,
+        trip_id=session.trip_id,
+        messages=[
+            ChatMessage(role=m["role"], content=m["content"])
+            for m in (session.messages or [])
+        ],
+        current_state=session.current_state
+    )
+
+
+@router.get("/chat/history/trip/{trip_id}", response_model=ChatHistoryResponse)
+async def get_latest_chat_history_by_trip(
+    trip_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session)
+):
+    """특정 여행의 최신 대화 히스토리 조회 (trip_id 기반)
+
+    프론트엔드에서 session_id를 모를 때 trip_id만으로 대화 이력을 복원합니다.
+    같은 trip에 여러 세션이 있으면 가장 최근 세션을 반환합니다.
+    """
+    # 여행 소유권 확인
+    trip = await trip_crud.get_trip_by_id(db, trip_id, current_user.id)
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="여행을 찾을 수 없습니다"
+        )
+
+    chat_service = get_chat_service()
+    session = await chat_service.get_latest_session_by_trip(db, current_user.id, trip_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 여행의 채팅 세션을 찾을 수 없습니다"
         )
 
     return ChatHistoryResponse(

@@ -275,12 +275,16 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         assistant_response: str
     ):
         """세션 히스토리 업데이트"""
+        from sqlalchemy.orm.attributes import flag_modified
+
         messages = session.messages or []
         messages.append({"role": "user", "content": user_message})
         messages.append({"role": "assistant", "content": assistant_response})
 
         # 최근 20개만 유지
         session.messages = messages[-20:]
+        # JSON 컬럼(list)의 내부 변경을 SQLAlchemy가 감지하도록 명시적으로 표시
+        flag_modified(session, "messages")
         await db.commit()
 
     def _format_itineraries(self, itineraries: List[Itinerary]) -> str:
@@ -415,12 +419,78 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 "needs_confirmation": False
             }
 
+    async def _search_place_in_db(
+        self,
+        db: AsyncSession,
+        name: str,
+        region: Optional[str] = None
+    ) -> Optional[Place]:
+        """DB에서 직접 장소 검색 — available_places 50개 안에 없을 때 폴백용.
+
+        통합검색(_get_places_by_hints)과의 차이:
+        - 통합검색은 인기순 상위 N개를 미리 불러와 GPT 컨텍스트로 제공
+        - 이 메서드는 사용자가 특정 장소명을 직접 지목했을 때 DB 전체를 대상으로 검색
+          → 인기도가 낮거나 새로 수집된 장소도 이름만 알면 찾을 수 있음
+        """
+        if not name:
+            return None
+
+        import re as _re
+        from sqlalchemy import nulls_last
+
+        # 1. 정확 매칭 (지역 필터 포함)
+        q = select(Place).where(Place.name == name)
+        if region:
+            q = q.where(Place.address.contains(region))
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 2. 포함 매칭 (지역 필터 포함, 인기순)
+        q = select(Place).where(Place.name.contains(name))
+        if region:
+            q = q.where(Place.address.contains(region))
+        q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 3. 포함 매칭 (지역 필터 없이 재시도 — 지역 표기가 달라도 찾을 수 있도록)
+        q = (
+            select(Place)
+            .where(Place.name.contains(name))
+            .order_by(nulls_last(Place.readcount.desc()))
+            .limit(1)
+        )
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 4. 한글 토큰 분리 후 가장 긴 토큰으로 검색
+        tokens = sorted(_re.findall(r'[가-힣]{2,}', name), key=len, reverse=True)
+        for token in tokens[:2]:
+            q = select(Place).where(Place.name.contains(token))
+            if region:
+                q = q.where(Place.address.contains(region))
+            q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place
+
+        return None
+
     def _find_place_by_name(
         self,
         name: str,
         places: List[Place]
     ) -> Optional[Place]:
-        """장소명으로 매칭 (정확 → 포함 → 토큰 교집합 순으로 폴백)"""
+        """장소명으로 매칭 (정확 → 포함 → 토큰 교집합 순으로 폴백)
+        available_places 리스트 안에서만 검색. DB 전체 검색은 _search_place_in_db 사용.
+        """
         if not name:
             return None
 
@@ -593,6 +663,9 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         if change.get("place_name"):
             place = self._find_place_by_name(change["place_name"], available_places)
+            # available_places(상위 50개)에 없으면 DB 전체에서 직접 검색
+            if not place:
+                place = await self._search_place_in_db(db, change["place_name"], trip.region)
 
         if not place and change.get("place_id"):
             place = place_id_dict.get(change["place_id"])
@@ -662,17 +735,25 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # ── 넣을 장소(new) 찾기 ──
         new_place = None
 
-        # target_search_keyword: 검색 키워드로 available_places에서 찾기
+        # target_search_keyword: 검색 키워드로 available_places에서 찾기 → 없으면 DB 직접 검색
         if change.get("target_search_keyword"):
             new_place = self._find_place_by_name(
                 change["target_search_keyword"], available_places
             )
+            if not new_place:
+                new_place = await self._search_place_in_db(
+                    db, change["target_search_keyword"], trip.region
+                )
 
         # new_place 이름으로 폴백
         if not new_place:
             new_place = self._find_place_by_name(
                 change.get("new_place", ""), available_places
             )
+            if not new_place and change.get("new_place"):
+                new_place = await self._search_place_in_db(
+                    db, change["new_place"], trip.region
+                )
 
         # place_id로 직접 매핑
         if not new_place and change.get("place_id"):
@@ -979,12 +1060,33 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         user_id: int,
         session_id: int
     ) -> Optional[ChatSession]:
-        """대화 히스토리 조회"""
+        """대화 히스토리 조회 (session_id 기반)"""
         result = await db.execute(
             select(ChatSession).where(
                 ChatSession.id == session_id,
                 ChatSession.user_id == user_id
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_latest_session_by_trip(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip_id: int
+    ) -> Optional[ChatSession]:
+        """특정 여행의 가장 최근 채팅 세션 조회 (trip_id 기반)
+
+        프론트엔드에서 session_id를 저장하지 않았을 때 대화를 이어가기 위해 사용.
+        """
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.user_id == user_id,
+                ChatSession.trip_id == trip_id
+            )
+            .order_by(ChatSession.id.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
