@@ -285,3 +285,34 @@ async def toggle_like(
     like_count = result.scalar() or 0
 
     return is_liked, like_count
+
+async def get_liked_posts_by_user(
+    db: AsyncSession,
+    user_id: int,
+    skip: int = 0,
+    limit: int = 20,
+) -> tuple[list[TravelPost], int]:
+    """내가 좋아요한 게시글 목록 (최신 좋아요 순)"""
+    base_where = PostLike.user_id == user_id
+
+    count_query = (
+        select(func.count())
+        .select_from(PostLike)
+        .where(base_where)
+    )
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(TravelPost)
+        .join(PostLike, PostLike.post_id == TravelPost.id)
+        .options(selectinload(TravelPost.user))
+        .where(base_where)
+        .order_by(PostLike.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    items_result = await db.execute(query)
+    items = items_result.scalars().all()
+
+    return items, total

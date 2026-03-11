@@ -148,6 +148,27 @@ async def list_my_posts(
         total_pages=total_pages,
     )
 
+@router.get("/me/liked", response_model=PostListResponse)
+async def list_liked_posts(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(provide_session),
+):
+    """내가 좋아요한 게시글 목록 (로그인 필요)"""
+    skip = (page - 1) * size
+    items, total = await crud.get_liked_posts_by_user(
+        db, user_id=current_user.id, skip=skip, limit=size
+    )
+    total_pages = (total + size - 1) // size
+
+    return PostListResponse(
+        items=[_build_summary(p) for p in items],
+        total=total,
+        page=page,
+        size=size,
+        total_pages=total_pages,
+    )
 
 @router.get("", response_model=PostListResponse)
 async def list_posts(
