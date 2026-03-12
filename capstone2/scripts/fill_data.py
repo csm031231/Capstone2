@@ -71,12 +71,12 @@ async def step2_collect_weak_regions():
     """
     # (지역 이름, TourAPI area_code에서 사용하는 키)
     areas = [
-        "충북",   # 충청북도 → 0개
-        "충남",   # 충청남도 → 1개
+        # "충북",  # 충청북도 → 755개로 수집 완료
+        "충남",   # 충청남도 → 101개, 추가 수집 필요
         "울산",   # 울산     → 3개
-        "대전",   # 대전     → 10개
+        "대전",   # 대전     → 13개
         "대구",   # 대구     → 141개
-        "광주",   # 광주     → 180개
+        "광주",   # 광주     → 217개
     ]
     collector = get_collector_service()
     total = 0
@@ -114,7 +114,7 @@ async def step3_update_descriptions():
     batch_size = 50
     total_updated = 0
     call_count = 0
-    no_progress_count = 0  # 진행 없는 배치 연속 횟수
+    quota_fail_count = 0   # 할당량 소진 감지용 (오류만 발생하는 배치 연속 횟수)
 
     log("=" * 50)
     log("STEP 3: 기존 데이터 description 업데이트 시작")
@@ -146,22 +146,17 @@ async def step3_update_descriptions():
                 log("  남은 대상 없음 - 완료!")
                 break
 
-            # 진행 없는 배치 체크 (업데이트+스킵=0이면 API 오류만 발생)
-            if updated == 0 and skipped == 0:
-                no_progress_count += 1
-                if no_progress_count >= 3:
-                    log("  연속 3회 진행 없음 - 60초 대기 후 재시도 (API rate limit 회복)")
-                    await asyncio.sleep(60)
-                    no_progress_count = 0
-                else:
-                    await asyncio.sleep(10)
+            # 할당량 소진 감지: 오류율 80% 이상이고 업데이트+스킵=0인 배치가 3회 연속
+            if errors >= batch_size * 0.8 and updated == 0 and skipped == 0:
+                quota_fail_count += 1
+                if quota_fail_count >= 3:
+                    log(f"  *** TourAPI 일일 할당량 소진 감지 - STEP 3 중단 ***")
+                    log(f"  (연속 {quota_fail_count}회 오류율 80%+, 업데이트/스킵 없음)")
+                    break
             else:
-                no_progress_count = 0
+                quota_fail_count = 0
 
-            # 오류 많을 시 잠깐 대기
-            if errors >= batch_size * 0.5:
-                log("  오류 많음 - 20초 대기 후 재시도")
-                await asyncio.sleep(20)
+            await asyncio.sleep(0.5)
 
         except Exception as e:
             log(f"  배치 #{call_count} 예외: {e}")
@@ -181,13 +176,13 @@ async def main():
     init_db(config)
     log("DB 연결 완료\n")
 
-    # STEP 1: 음식점 수집 (이미 9,456개 있으므로 대부분 스킵될 것)
-    await step1_collect_food()
+    # STEP 1: 음식점 수집 - 이미 9,456개 있어서 생략 (API 할당량 절약)
+    # await step1_collect_food()
 
-    # STEP 2: 부족 지역 보완 (충북 0→수집, 충남 1→수집, 울산 3→수집, 대전 10→수집, 대구/광주 보완)
+    # STEP 2: 부족 지역 보완 (충북/충남/울산/대전/대구/광주)
     await step2_collect_weak_regions()
 
-    # STEP 3: description 업데이트 (17,861개 대상)
+    # STEP 3: description 업데이트
     await step3_update_descriptions()
 
     log("=" * 50)

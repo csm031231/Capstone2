@@ -342,8 +342,10 @@ class DataCollectorService:
                     if wiki_desc:
                         description = wiki_desc
 
-                # description 없으면 스킵 (NULL 유지)
+                # description 없으면 빈 문자열로 마킹 (NULL 유지 시 무한루프 방지)
                 if not description:
+                    place.description = ""
+                    await db.commit()
                     skipped += 1
                     await asyncio.sleep(0.2)
                     continue
@@ -396,14 +398,26 @@ class DataCollectorService:
                 errors += 1
                 print(f"[update_missing_data] 오류 place_id={place.id} name={place.name}: {e}")
 
+        # 실제 남은 개수 재조회 (skipped도 처리됐으므로 정확한 값)
+        remaining_result = await db.execute(
+            select(func.count()).select_from(Place).where(
+                and_(
+                    Place.description.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            )
+        )
+        remaining_after = remaining_result.scalar() or 0
+
         return {
             "success": True,
             "processed": len(places),
             "updated": updated,
             "skipped_no_desc": skipped,
             "errors": errors,
-            "remaining": max(0, remaining_before - updated),
-            "message": f"{updated}개 업데이트 완료. 남은 대상: {max(0, remaining_before - updated)}개"
+            "remaining": remaining_after,
+            "message": f"{updated}개 업데이트 완료. 남은 대상: {remaining_after}개"
         }
 
     async def get_collection_stats(self, db: AsyncSession) -> Dict[str, Any]:

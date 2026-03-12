@@ -31,7 +31,8 @@ class ChatService:
 - add: 새 장소 추가
 - remove: 기존 장소 제거
 - replace: 장소 교체
-- reorder: 특정 장소 하나의 순서/일차 변경
+- reorder: 특정 장소 하나를 특정 번호 위치로 이동 (new_order 필드 사용, 반드시 현재 일정에서 정확한 위치 번호 지정)
+- swap_places: 같은 일차 내 두 장소의 위치를 서로 교환 (place_a, place_b 필드 사용)
 - swap_days: 두 일차의 모든 장소를 통째로 교환 (day_a, day_b 필드 사용)
 - modify: 시간/메모 수정
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
@@ -40,7 +41,9 @@ class ChatService:
 - question: 추가 정보 필요
 
 ## 언제 어떤 액션을 쓸지 판단 기준
-- 특정 장소 하나를 추가/제거/교체/순서변경/시간수정 → add/remove/replace/reorder/modify
+- 특정 장소 하나를 추가/제거/교체/시간수정 → add/remove/replace/modify
+- "A랑 B 자리 바꿔줘", "A와 B 순서 교환", "오전 관광지 순서 바꿔줘" 등 두 장소를 서로 맞교환 → swap_places (place_a, place_b에 각각 장소명)
+- "A를 첫 번째로", "B를 3번째로" 등 특정 장소를 특정 위치로 이동 → reorder (new_order에 반드시 정확한 위치 번호)
 - "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
@@ -50,7 +53,7 @@ class ChatService:
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|swap_days|modify|regenerate|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -112,6 +115,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 사용자: "야경 명소 많이 넣어서 처음부터 다시"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["야경"], "requirements": "야경 명소를 저녁 이후 반드시 포함, 야간 관광 위주"}], "response_message": "야경 위주로 전체 일정을 새로 만들게요!", "needs_confirmation": false}
 
+사용자: "해운대랑 감천문화마을 자리 바꿔줘"
+응답: {"action_type": "swap_places", "changes": [{"action": "swap_places", "place_a": "해운대해수욕장", "place_b": "감천문화마을"}], "response_message": "해운대해수욕장과 감천문화마을의 순서를 교환할게요!", "needs_confirmation": false}
+
+사용자: "2번째랑 4번째 순서 바꿔줘"
+응답: {"action_type": "swap_places", "changes": [{"action": "swap_places", "place_a": "2번째 장소명", "place_b": "4번째 장소명"}], "response_message": "2번째와 4번째 장소 순서를 교환할게요!", "needs_confirmation": false}
+
 사용자: "1일차랑 4일차 바꿔줘"
 응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 1, "day_b": 4}], "response_message": "1일차와 4일차를 통째로 교환할게요!", "needs_confirmation": false}
 
@@ -124,8 +133,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 사용자: "맛집 더 넣어줘"
 응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}
 
-사용자: "카페 추가해줘"
-응답: {"action_type": "add", "changes": [], "response_message": "어떤 분위기의 카페를 원하세요? 예를 들어 뷰가 좋은 곳, 디저트가 맛있는 곳, 조용한 분위기 중 어떤 걸 선호하세요?", "needs_confirmation": true, "confirmation_question": "카페 분위기 선호도를 알려주세요"}"""
+사용자: "카페빼고 식당 2개 넣어줘"
+응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
@@ -650,6 +659,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     if result:
                         applied_changes.append(result)
 
+                elif action == "swap_places":
+                    result = await self._apply_swap_places(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
                 elif action == "swap_days":
                     result = await self._apply_swap_days(db, trip, change)
                     if result:
@@ -858,37 +872,68 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         from Trip.dto import ItineraryUpdate
 
-        # 대상 장소를 먼저 원하는 day/order로 이동
-        await trip_crud.update_itinerary(
-            db, target.id,
-            ItineraryUpdate(day_number=new_day, order_index=new_order)
-        )
-
-        # 같은 날의 나머지 장소들을 충돌 없이 재정렬
-        same_day = sorted(
+        # DB 업데이트 전에 같은 날 장소 목록 및 시작 시간 미리 수집
+        same_day_snapshot = sorted(
             [it for it in trip.itineraries if it.day_number == new_day],
             key=lambda x: (x.order_index, x.id)
         )
+        first_time = next((it.arrival_time for it in same_day_snapshot if it.arrival_time is not None), None)
+        target_name = target.place.name
 
         # 대상 장소를 원하는 위치에 끼워넣고 나머지를 순서대로 밀어냄
-        others = [it for it in same_day if it.id != target.id]
-        # new_order 위치에 target을 삽입
+        others = [it for it in same_day_snapshot if it.id != target.id]
         insert_at = max(0, min(new_order - 1, len(others)))
         ordered = others[:insert_at] + [target] + others[insert_at:]
 
+        # 순서대로 order_index 적용
         for idx, it in enumerate(ordered, start=1):
-            if it.order_index != idx:
-                await trip_crud.update_itinerary(
-                    db, it.id,
-                    ItineraryUpdate(order_index=idx)
-                )
+            await trip_crud.update_itinerary(
+                db, it.id,
+                ItineraryUpdate(day_number=new_day, order_index=idx)
+            )
+
+        # 순서 변경 후 arrival_time 재계산
+        start_h = first_time.hour if first_time else 9
+        start_m = first_time.minute if first_time else 0
+        await self._recalculate_day_times(db, ordered, start_hour=start_h, start_minute=start_m)
 
         return {
             "action": "reorder",
-            "place_name": target.place.name,
+            "place_name": target_name,
             "day_number": new_day,
             "order_index": new_order
         }
+
+    async def _recalculate_day_times(self, db, ordered_itineraries: list, start_hour: int = 9, start_minute: int = 0):
+        """순서 변경 후 arrival_time을 체인 방식으로 재계산.
+        ordered_itineraries: 이미 order_index 순으로 정렬된 당일 일정 리스트
+        """
+        from datetime import time as time_type
+        from Trip.dto import ItineraryUpdate
+
+        if not ordered_itineraries:
+            return
+
+        current_minutes = start_hour * 60 + start_minute
+
+        for i, it in enumerate(ordered_itineraries):
+            h, m = divmod(current_minutes, 60)
+            if h >= 24:
+                h, m = 23, 59
+            new_arrival = time_type(h, m)
+
+            await trip_crud.update_itinerary(
+                db, it.id,
+                ItineraryUpdate(arrival_time=new_arrival)
+            )
+
+            # 다음 장소 도착 시간 = 현재 도착 + 체류 시간 + 다음 장소까지 이동 시간
+            stay = it.stay_duration or 60
+            if i + 1 < len(ordered_itineraries):
+                travel = ordered_itineraries[i + 1].travel_time_from_prev or 15
+            else:
+                travel = 0
+            current_minutes += stay + travel
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
         """시간/메모 수정"""
@@ -1070,6 +1115,79 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 await db.commit()
 
             return {"action": "regenerate", "scope": "전체 재생성"}
+
+    async def _apply_swap_places(self, db, trip, change) -> Optional[dict]:
+        """같은 일차 내 두 장소의 order_index를 서로 교환"""
+        it_a = self._find_itinerary_by_name(
+            change.get("place_a", ""), trip.itineraries
+        )
+        it_b = self._find_itinerary_by_name(
+            change.get("place_b", ""), trip.itineraries
+        )
+
+        if not it_a or not it_b or it_a.id == it_b.id:
+            return None
+
+        from Trip.dto import ItineraryUpdate
+
+        order_a = it_a.order_index
+        order_b = it_b.order_index
+        day_a = it_a.day_number
+        day_b = it_b.day_number
+
+        # DB 업데이트 전에 각 일차의 전체 장소 목록 및 시작 시간 미리 수집
+        days_snapshot: dict[int, list] = {}
+        for day in {day_a, day_b}:
+            its = sorted(
+                [it for it in trip.itineraries if it.day_number == day],
+                key=lambda x: x.order_index
+            )
+            days_snapshot[day] = its
+
+        # 각 일차의 시작 시간 미리 저장
+        start_times: dict[int, tuple] = {}
+        for day, its in days_snapshot.items():
+            ft = next((it.arrival_time for it in its if it.arrival_time is not None), None)
+            start_times[day] = (ft.hour if ft else 9, ft.minute if ft else 0)
+
+        # 순서만 맞교환 (일차도 다를 수 있으므로 day_number도 교환)
+        await trip_crud.update_itinerary(
+            db, it_a.id,
+            ItineraryUpdate(day_number=day_b, order_index=order_b)
+        )
+        await trip_crud.update_itinerary(
+            db, it_b.id,
+            ItineraryUpdate(day_number=day_a, order_index=order_a)
+        )
+
+        # 영향받은 각 일차의 arrival_time 재계산
+        # swap 후 순서: snapshot 기반으로 it_a ↔ it_b 교환하여 직접 구성
+        for day in {day_a, day_b}:
+            its = days_snapshot[day]
+            # it_a가 이 날에 있었으면 it_b로 교체, it_b가 있었으면 it_a로 교체
+            new_its = []
+            for it in its:
+                if it.id == it_a.id:
+                    new_its.append(it_b)
+                elif it.id == it_b.id:
+                    new_its.append(it_a)
+                else:
+                    new_its.append(it)
+            # order_index 기준으로 재정렬 (swap 전 snapshot 순서 유지, id 기준 대체만)
+            new_its_sorted = sorted(new_its, key=lambda x: (
+                order_b if x.id == it_b.id and day == day_a else
+                order_a if x.id == it_a.id and day == day_b else
+                x.order_index
+            ))
+            if new_its_sorted:
+                sh, sm = start_times[day]
+                await self._recalculate_day_times(db, new_its_sorted, start_hour=sh, start_minute=sm)
+
+        return {
+            "action": "swap_places",
+            "place_a": it_a.place.name,
+            "place_b": it_b.place.name,
+        }
 
     async def _apply_swap_days(self, db, trip, change) -> Optional[dict]:
         """두 일차의 모든 장소를 통째로 교환
