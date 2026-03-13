@@ -11,6 +11,7 @@ from core.config import get_config
 from core.models import ChatSession, Itinerary, Place, Trip
 from Trip import crud as trip_crud
 from Planner.dto import ChatRequest, ChatResponse, ChatMessage, ChangeItem
+from Planner.constants import REGION_PREFIX, CHAT_CONTEXT_LIMIT, CHAT_STORAGE_LIMIT, GPT_CHAT_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
     def __init__(self):
         config = get_config()
         self.client = OpenAI(api_key=config.openai_api_key)
+        self.model = config.openai_model
 
     async def process_message(
         self,
@@ -184,9 +186,9 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             {"role": "system", "content": f"## 추가 가능한 장소\n{places_context}"}
         ]
 
-        # 이전 대화 추가 (최근 10개)
+        # 이전 대화 추가 (최근 CHAT_CONTEXT_LIMIT개)
         if session.messages:
-            for msg in session.messages[-10:]:
+            for msg in session.messages[-CHAT_CONTEXT_LIMIT:]:
                 messages.append(msg)
 
         # 새 메시지 추가
@@ -195,7 +197,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # 6. GPT 호출 (파싱 실패 시 최대 2회 재시도)
         def _call_gpt():
             return self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self.model,
                 messages=messages,
                 max_tokens=1000,
                 temperature=0.5,
@@ -318,8 +320,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         messages.append({"role": "user", "content": user_message})
         messages.append({"role": "assistant", "content": assistant_response})
 
-        # 최근 20개만 유지
-        session.messages = messages[-20:]
+        # 최근 CHAT_STORAGE_LIMIT개만 유지
+        session.messages = messages[-CHAT_STORAGE_LIMIT:]
         # JSON 컬럼(list)의 내부 변경을 SQLAlchemy가 감지하도록 명시적으로 표시
         flag_modified(session, "messages")
         await db.commit()
@@ -379,10 +381,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         collected: List[Place] = []
         seen_ids: set = set()
 
-        # 전라도→전라, 경상도→경상 등 광역 지역명 → DB 부분 문자열 매핑
-        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청",
-                          "강원도": "강원", "제주도": "제주"}
-        search_region = _REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+        search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
 
         # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
@@ -480,10 +479,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         import re as _re
         from sqlalchemy import nulls_last
 
-        # 전라도→전라, 강원도→강원 등 광역 지역명 정규화
-        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청",
-                          "강원도": "강원", "제주도": "제주"}
-        search_region = _REGION_PREFIX.get(region, region) if region else None
+        search_region = REGION_PREFIX.get(region, region) if region else None
 
         # 1. 정확 매칭 (지역 필터 포함)
         q = select(Place).where(Place.name == name)

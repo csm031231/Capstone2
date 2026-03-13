@@ -22,6 +22,7 @@ from Recommend.preference_service import (
 from Planner.dto import GenerateRequest, GenerateResponse, GeneratedItinerary, DaySummary
 from Planner.route_optimizer import get_route_optimizer
 from Planner.time_constraint import get_time_constraint_service
+from Planner.constants import REGION_PREFIX, GPT_PLANNER_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class PlannerService:
     def __init__(self):
         config = get_config()
         self.client = OpenAI(api_key=config.openai_api_key)
+        self.model = config.openai_model
         self.recommender = get_condition_recommender()
         self.route_optimizer = get_route_optimizer()
         self.time_service = get_time_constraint_service()
@@ -210,8 +212,7 @@ class PlannerService:
             cat = c.get('category', '')
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
-        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청"}
-        search_region = _REGION_PREFIX.get(request.region, request.region)
+        search_region = REGION_PREFIX.get(request.region, request.region)
 
         for cat, min_count in min_counts.items():
             shortage = min_count - cat_counts.get(cat, 0)
@@ -334,7 +335,7 @@ class PlannerService:
 
         def _call_gpt():
             return self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self.model,
                 messages=[
                     {
                         "role": "system",
@@ -342,7 +343,7 @@ class PlannerService:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=3000,
+                max_tokens=GPT_PLANNER_MAX_TOKENS,
                 temperature=0.7
             )
 

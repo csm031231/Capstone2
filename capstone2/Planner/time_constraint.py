@@ -5,6 +5,11 @@ from typing import List, Dict, Optional, Tuple, Any
 
 from core.models import UserPreference
 from services.kakao_service import get_route_info
+from Planner.constants import (
+    WEEKDAY_KR, WEEKDAY_EN,
+    DEFAULT_DAY_START, DEFAULT_DAY_END,
+    LUNCH_START, LUNCH_END, DINNER_START, NIGHT_START,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +53,25 @@ class TimeConstraintService:
     # ── 구조 분리 ─────────────────────────────────────────────────────────────
 
     def _is_night_place(self, p: dict) -> bool:
-        """야경/야간 장소 여부 판별"""
+        """야경/야간 장소 여부 판별.
+
+        우선순위:
+        1. GPT가 is_night=true로 명시 → 카테고리 무관하게 야간 취급
+        2. 태그/이름에 야간 키워드 포함 → 야간 취급 (단, 명확한 비야간 카테고리 제외)
+        """
+        # GPT가 명시적으로 야간 장소로 표시한 경우 우선 신뢰
+        if p.get('is_night_place', False):
+            return True
+
         NON_NIGHT_CATEGORIES = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
         category = (p.get('place_category') or p.get('category') or '')
         if category in NON_NIGHT_CATEGORIES:
             return False
+
         tags = p.get('tags') or []
         name = (p.get('place_name') or p.get('name', '')).lower()
         return (
-            p.get('is_night_place', False)
-            or any(kw in t.lower() for t in tags for kw in self.NIGHT_KEYWORDS)
+            any(kw in t.lower() for t in tags for kw in self.NIGHT_KEYWORDS)
             or any(kw in name for kw in self.NIGHT_KEYWORDS)
         )
 
@@ -90,10 +104,17 @@ class TimeConstraintService:
             warnings.append(f"{day_num}일차: 저녁 식당이 없습니다")
 
         split = min(len(others) // 2, 2)
+        afternoon = others[split:]
+
+        # 야경 장소가 없고 오후 장소가 2개 이상이면 마지막 오후 장소를 저녁 이후로 이동
+        # (저녁 식사 후 빈 시간 방지 — 야경 전용 제약 없이 자연스럽게 배치됨)
+        if not night_places and len(afternoon) >= 2:
+            night_places = [afternoon.pop()]
+
         return {
             'morning':   others[:split],
             'lunch':     [lunch] if lunch else [],
-            'afternoon': others[split:],
+            'afternoon': afternoon,
             'dinner':    [dinner] if dinner else [],
             'night':     night_places,
         }, warnings
@@ -128,12 +149,12 @@ class TimeConstraintService:
         segmented_by_day 는 structural_split_all 또는 route_optimizer.optimize_segments 의 출력.
         """
         if preference:
-            day_start = preference.preferred_start_time or time(9, 0)
-            day_end = preference.preferred_end_time or time(23, 0)
+            day_start = preference.preferred_start_time or DEFAULT_DAY_START
+            day_end = preference.preferred_end_time or DEFAULT_DAY_END
             pace = preference.travel_pace or "moderate"
         else:
-            day_start = time(9, 0)
-            day_end = time(23, 0)
+            day_start = DEFAULT_DAY_START
+            day_end = DEFAULT_DAY_END
             pace = "moderate"
 
         pace_config = self.PACE_CONFIG.get(pace, self.PACE_CONFIG["moderate"])
@@ -170,26 +191,23 @@ class TimeConstraintService:
                 place_category = place.get('place_category') or place.get('category') or ''
                 if place_category in ('맛집', '식당'):
                     t = arrival_time.time()
-                    lunch_start = time(12, 0)
-                    lunch_end = time(14, 0)
-                    dinner_start = time(18, 30)
-                    if t < lunch_start:
-                        meal_time = datetime.combine(current_date, lunch_start)
+                    if t < LUNCH_START:
+                        meal_time = datetime.combine(current_date, LUNCH_START)
                         arrival_time = meal_time
                         if current_time < meal_time:
                             current_time = meal_time
-                    elif lunch_end <= t < dinner_start:
-                        meal_time = datetime.combine(current_date, dinner_start)
+                    elif LUNCH_END <= t < DINNER_START:
+                        meal_time = datetime.combine(current_date, DINNER_START)
                         arrival_time = meal_time
                         if current_time < meal_time:
                             current_time = meal_time
 
-                # 야경 20:00 이전 불가
-                if self._is_night_place(place) and arrival_time.time() < time(20, 0):
-                    night_start = datetime.combine(current_date, time(20, 0))
-                    arrival_time = night_start
-                    if current_time < night_start:
-                        current_time = night_start
+                # 야경 NIGHT_START 이전 불가
+                if self._is_night_place(place) and arrival_time.time() < NIGHT_START:
+                    night_dt = datetime.combine(current_date, NIGHT_START)
+                    arrival_time = night_dt
+                    if current_time < night_dt:
+                        current_time = night_dt
 
                 # 휴무일 체크
                 if self._is_closed(place.get('closed_days'), current_date):
@@ -279,9 +297,9 @@ class TimeConstraintService:
         errors = []
 
         if preference:
-            day_end = preference.preferred_end_time or time(23, 0)
+            day_end = preference.preferred_end_time or DEFAULT_DAY_END
         else:
-            day_end = time(23, 0)
+            day_end = DEFAULT_DAY_END
 
         for day_num, places in places_by_day.items():
             if isinstance(day_num, str) and day_num.startswith('_'):
@@ -367,11 +385,8 @@ class TimeConstraintService:
             return False
 
         weekday = check_date.weekday()
-        weekday_names_kr = ["월", "화", "수", "목", "금", "토", "일"]
-        weekday_names_en = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-
-        today_kr = weekday_names_kr[weekday]
-        today_en = weekday_names_en[weekday]
+        today_kr = WEEKDAY_KR[weekday]
+        today_en = WEEKDAY_EN[weekday]
 
         closed_lower = closed_days.lower()
 
