@@ -110,11 +110,12 @@ async def step2_collect_weak_regions():
 
 async def step3_update_descriptions():
     """기존 데이터 description 업데이트 (배치 반복)"""
+    import time as _time
     collector = get_collector_service()
     batch_size = 50
     total_updated = 0
     call_count = 0
-    quota_fail_count = 0   # 할당량 소진 감지용 (오류만 발생하는 배치 연속 횟수)
+    slow_batch_count = 0   # 할당량 소진 감지: 배치 5분 초과 연속 횟수
 
     log("=" * 50)
     log("STEP 3: 기존 데이터 description 업데이트 시작")
@@ -123,12 +124,14 @@ async def step3_update_descriptions():
 
     while True:
         try:
+            t0 = _time.time()
             async with database.DBSessionLocal() as session:
                 result = await collector.update_missing_data(
                     db=session,
                     batch_size=batch_size,
                     enhance_with_wiki=False
                 )
+            elapsed = _time.time() - t0
 
             call_count += 1
             updated   = result.get("updated", 0)
@@ -139,22 +142,23 @@ async def step3_update_descriptions():
             total_updated += updated
 
             log(f"  배치 #{call_count:3d} | 업데이트: {updated:3d} | 스킵: {skipped:3d} | "
-                f"오류: {errors:2d} | 남은 대상: {remaining:,}개 | 누적: {total_updated:,}개")
+                f"오류: {errors:2d} | 남은 대상: {remaining:,}개 | 누적: {total_updated:,}개 | {elapsed:.0f}초")
 
             # 더 이상 처리할 게 없으면 종료
             if remaining == 0 or processed == 0:
                 log("  남은 대상 없음 - 완료!")
                 break
 
-            # 할당량 소진 감지: 오류율 80% 이상이고 업데이트+스킵=0인 배치가 3회 연속
-            if errors >= batch_size * 0.8 and updated == 0 and skipped == 0:
-                quota_fail_count += 1
-                if quota_fail_count >= 3:
+            # 할당량 소진 감지: 배치 소요 300초(5분) 초과 + 업데이트 없음 → 429 재시도 중
+            # (정상: 50개 × ~1초 = ~50초 / 429소진: 50개 × 155초 = 7750초)
+            if elapsed > 300 and updated == 0:
+                slow_batch_count += 1
+                if slow_batch_count >= 2:
                     log(f"  *** TourAPI 일일 할당량 소진 감지 - STEP 3 중단 ***")
-                    log(f"  (연속 {quota_fail_count}회 오류율 80%+, 업데이트/스킵 없음)")
+                    log(f"  (연속 {slow_batch_count}회 배치 {elapsed:.0f}초 소요, 업데이트 없음)")
                     break
             else:
-                quota_fail_count = 0
+                slow_batch_count = 0
 
             await asyncio.sleep(0.5)
 

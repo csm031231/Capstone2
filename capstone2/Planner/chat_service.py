@@ -1211,7 +1211,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         day_a_ids = [it.id for it in trip.itineraries if it.day_number == day_a]
         day_b_ids = [it.id for it in trip.itineraries if it.day_number == day_b]
 
-        if not day_a_ids and not day_b_ids:
+        if not day_a_ids or not day_b_ids:
             return None
 
         for iid in day_a_ids:
@@ -1222,6 +1222,16 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         for iid in day_a_ids:
             await trip_crud.update_itinerary(db, iid, ItineraryUpdate(day_number=day_b))
+
+        # 두 일차 모두 arrival_time 재계산 (교환 후 시간 순서 정렬)
+        all_its = await trip_crud.get_itineraries_by_trip(db, trip.id)
+        for day in [day_a, day_b]:
+            day_its = sorted(
+                [it for it in all_its if it.day_number == day],
+                key=lambda x: x.order_index
+            )
+            if day_its:
+                await self._recalculate_day_times(db, day_its)
 
         return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
 
