@@ -361,6 +361,39 @@ class RouteOptimizer:
 
         return places
 
+    async def optimize_segments(
+        self,
+        segmented_by_day: Dict[int, Dict[str, list]]
+    ) -> Dict[int, Dict[str, list]]:
+        """세그먼트 내 TSP 최적화 (아침/오후만, 식사·야경은 위치 고정).
+
+        Args:
+            segmented_by_day: structural_split_all 출력 형식
+                {day_num: {'morning': [...], 'lunch': [...], 'afternoon': [...], 'dinner': [...], 'night': [...]}}
+
+        Returns:
+            같은 구조, morning/afternoon 순서만 TSP 최적화됨
+        """
+        result = {}
+        for day_num, segments in segmented_by_day.items():
+            optimized = dict(segments)
+
+            for seg_name in ('morning', 'afternoon'):
+                places = segments.get(seg_name, [])
+                if len(places) < 3:
+                    # 2개 이하면 TSP 불필요
+                    optimized[seg_name] = places
+                    continue
+
+                start = (places[0]['latitude'], places[0]['longitude'])
+                distance_matrix = self._build_distance_matrix(places)
+                route = self._nearest_neighbor(distance_matrix, start, places)
+                route = self._two_opt(route, distance_matrix)
+                optimized[seg_name] = [places[i] for i in route]
+
+            result[day_num] = optimized
+        return result
+
     def estimate_total_travel_time(
         self,
         places_by_day: Dict[int, List[dict]]

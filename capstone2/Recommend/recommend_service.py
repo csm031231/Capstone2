@@ -114,9 +114,11 @@ class ConditionRecommender:
         """DB 필터링"""
         query = select(Place)
 
-        # 지역 필터
+        # 지역 필터 (전라도→전라, 경상도→경상, 충청도→충청으로 확장 매칭)
         if condition.region:
-            query = query.where(Place.address.contains(condition.region))
+            _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청"}
+            search_region = _REGION_PREFIX.get(condition.region, condition.region)
+            query = query.where(Place.address.contains(search_region))
 
         # 카테고리 필터
         if condition.categories:
@@ -300,7 +302,9 @@ class ConditionRecommender:
             reasons.append(f"카테고리: {place.category}")
 
         # 지역 매칭
-        if condition.region and condition.region in (place.address or ""):
+        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청"}
+        _search_region = _REGION_PREFIX.get(condition.region, condition.region) if condition.region else None
+        if _search_region and _search_region in (place.address or ""):
             reasons.append(f"지역: {condition.region}")
 
         # 선호도 매칭

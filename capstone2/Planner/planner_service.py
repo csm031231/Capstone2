@@ -62,7 +62,7 @@ class PlannerService:
         )
 
         if not candidates:
-            raise ValueError("조건에 맞는 여행지가 없습니다")
+            raise ValueError(f"'{request.region}' 지역에서 조건에 맞는 여행지를 찾을 수 없습니다. 테마나 지역을 변경해 주세요.")
         print(f"[PLANNER] 2단계 완료: {len(candidates)}개 후보 장소")
 
         # 3단계: GPT 일정 초안 생성
@@ -78,33 +78,35 @@ class PlannerService:
         places_by_day = self._build_places_by_day(draft, place_dict)
         print(f"[PLANNER] 4단계 완료: {sum(len(v) for v in places_by_day.values())}개 장소 매핑")
 
-        # 5단계: 동선 최적화
-        print("[PLANNER] 5단계: 동선 최적화 시작")
-        optimized = await self.route_optimizer.optimize(
-            places_by_day,
-            request.start_location,
-            request.end_location
-        )
+        # 5단계: 구조 분리 (식사/야경 위치 확정)
+        print("[PLANNER] 5단계: 구조 분리 시작")
+        segmented, structural_warnings = self.time_service.structural_split_all(places_by_day)
         print("[PLANNER] 5단계 완료")
 
-        # 6단계: 시간 제약 적용
-        print("[PLANNER] 6단계: 시간 제약 적용 시작")
-        constrained, warnings = self.time_service.apply_constraints(
-            optimized,
+        # 6단계: 세그먼트 내 TSP 최적화 (아침/오후 구간만)
+        print("[PLANNER] 6단계: 세그먼트 내 동선 최적화 시작")
+        segmented = await self.route_optimizer.optimize_segments(segmented)
+        print("[PLANNER] 6단계 완료")
+
+        # 7단계: 시간 제약 적용 (도착 시간 계산 + Kakao travel_time)
+        print("[PLANNER] 7단계: 시간 제약 적용 시작")
+        constrained, time_warnings = await self.time_service.apply_time_calculations(
+            segmented,
             user_preference,
             request.start_date
         )
-        print("[PLANNER] 6단계 완료")
+        warnings = structural_warnings + time_warnings
+        print("[PLANNER] 7단계 완료")
 
-        # 7단계: DB 저장
-        print("[PLANNER] 7단계: DB 저장 시작")
+        # 8단계: DB 저장
+        print("[PLANNER] 8단계: DB 저장 시작")
         trip = await self._save_trip(
             db, user_id, request, constrained, user_preference
         )
-        print(f"[PLANNER] 7단계 완료: trip_id={trip.id}")
+        print(f"[PLANNER] 8단계 완료: trip_id={trip.id}")
 
-        # 8단계: 응답 생성
-        print("[PLANNER] 8단계: 응답 생성")
+        # 9단계: 응답 생성
+        print("[PLANNER] 9단계: 응답 생성")
         return self._build_response(
             trip, constrained, draft, request, total_days, warnings
         )
@@ -208,12 +210,15 @@ class PlannerService:
             cat = c.get('category', '')
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
+        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청"}
+        search_region = _REGION_PREFIX.get(request.region, request.region)
+
         for cat, min_count in min_counts.items():
             shortage = min_count - cat_counts.get(cat, 0)
             if shortage > 0:
                 extra_q = (
                     sa_select2(Place)
-                    .where(Place.address.contains(request.region))
+                    .where(Place.address.contains(search_region))
                     .where(Place.category == cat)
                     .where(~Place.id.in_(existing_ids))
                     .order_by(nulls_last(Place.readcount.desc()))
@@ -460,12 +465,19 @@ class PlannerService:
             places = []
 
             for place_data in day_data.get("places", []):
-                place_id = place_data["place_id"]
+                place_id = place_data.get("place_id")
+                if not isinstance(place_id, int):
+                    logger.warning(f"{day_num}일차: place_id 없거나 유효하지 않은 항목 스킵 ({place_data})")
+                    continue
                 # 후보 목록에 없거나 이미 다른 날에 배치된 장소는 스킵
-                if place_id not in place_dict or place_id in used_place_ids:
+                if place_id not in place_dict:
+                    logger.warning(f"{day_num}일차: place_id={place_id} 후보 목록에 없음 - 스킵")
+                    continue
+                if place_id in used_place_ids:
                     continue
                 place = place_dict[place_id].copy()
-                place['order_index'] = place_data.get("order", len(places) + 1)
+                gpt_order = place_data.get("order")
+                place['order_index'] = gpt_order if isinstance(gpt_order, int) and gpt_order > 0 else len(places) + 1
                 place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
                 place['is_night_place'] = place_data.get("is_night", False)
                 place['selection_reason'] = place_data.get("reason", "AI 추천")

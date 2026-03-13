@@ -379,12 +379,17 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         collected: List[Place] = []
         seen_ids: set = set()
 
+        # 전라도→전라, 경상도→경상 등 광역 지역명 → DB 부분 문자열 매핑
+        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청",
+                          "강원도": "강원", "제주도": "제주"}
+        search_region = _REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+
         # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
             for cat in categories:
                 query = select(Place)
-                if trip.region:
-                    query = query.where(Place.address.contains(trip.region))
+                if search_region:
+                    query = query.where(Place.address.contains(search_region))
                 query = (
                     query
                     .where(Place.category == cat)
@@ -400,8 +405,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 50개 → 토큰 절약)
         if len(collected) < 30:
             query = select(Place)
-            if trip.region:
-                query = query.where(Place.address.contains(trip.region))
+            if search_region:
+                query = query.where(Place.address.contains(search_region))
             query = (
                 query
                 .order_by(nulls_last(Place.readcount.desc()))
@@ -475,10 +480,15 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         import re as _re
         from sqlalchemy import nulls_last
 
+        # 전라도→전라, 강원도→강원 등 광역 지역명 정규화
+        _REGION_PREFIX = {"전라도": "전라", "경상도": "경상", "충청도": "충청",
+                          "강원도": "강원", "제주도": "제주"}
+        search_region = _REGION_PREFIX.get(region, region) if region else None
+
         # 1. 정확 매칭 (지역 필터 포함)
         q = select(Place).where(Place.name == name)
-        if region:
-            q = q.where(Place.address.contains(region))
+        if search_region:
+            q = q.where(Place.address.contains(search_region))
         result = await db.execute(q)
         place = result.scalar_one_or_none()
         if place:
@@ -486,8 +496,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         # 2. 포함 매칭 (지역 필터 포함, 인기순)
         q = select(Place).where(Place.name.contains(name))
-        if region:
-            q = q.where(Place.address.contains(region))
+        if search_region:
+            q = q.where(Place.address.contains(search_region))
         q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
         result = await db.execute(q)
         place = result.scalar_one_or_none()
@@ -510,8 +520,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         tokens = sorted(_re.findall(r'[가-힣]{2,}', name), key=len, reverse=True)
         for token in tokens[:2]:
             q = select(Place).where(Place.name.contains(token))
-            if region:
-                q = q.where(Place.address.contains(region))
+            if search_region:
+                q = q.where(Place.address.contains(search_region))
             q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
             result = await db.execute(q)
             place = result.scalar_one_or_none()
@@ -764,17 +774,22 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         removed_day = target.day_number
         removed_name = target.place.name
+
+        # delete commit 전에 같은 날 나머지 장소의 (id, order_index) 미리 추출
+        # (commit 후 ORM 객체 속성이 expire되어 MissingGreenlet 발생 방지)
+        from Trip.dto import ItineraryUpdate
+        same_day_pairs = sorted(
+            [(it.id, it.order_index) for it in trip.itineraries
+             if it.id != target.id and it.day_number == removed_day],
+            key=lambda x: x[1]
+        )
+
         await trip_crud.delete_itinerary(db, target.id)
 
         # 같은 날 남은 장소들을 1부터 연속 재정렬 (구멍 방지)
-        from Trip.dto import ItineraryUpdate
-        same_day = sorted(
-            [it for it in trip.itineraries if it.id != target.id and it.day_number == removed_day],
-            key=lambda x: x.order_index
-        )
-        for idx, it in enumerate(same_day, start=1):
-            if it.order_index != idx:
-                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+        for idx, (it_id, current_order) in enumerate(same_day_pairs, start=1):
+            if current_order != idx:
+                await trip_crud.update_itinerary(db, it_id, ItineraryUpdate(order_index=idx))
 
         return {"action": "remove", "place_name": removed_name}
 
@@ -914,25 +929,31 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         if not ordered_itineraries:
             return
 
+        # commit 후 SQLAlchemy가 ORM 객체 속성을 expire 처리하므로
+        # 첫 commit 이전에 필요한 값을 모두 추출해 둔다 (MissingGreenlet 방지)
+        it_ids = [it.id for it in ordered_itineraries]
+        stays = [it.stay_duration or 60 for it in ordered_itineraries]
+        travel_times = [0] + [
+            (ordered_itineraries[i].travel_time_from_prev or 15)
+            for i in range(1, len(ordered_itineraries))
+        ]
+
         current_minutes = start_hour * 60 + start_minute
 
-        for i, it in enumerate(ordered_itineraries):
+        for i, it_id in enumerate(it_ids):
             h, m = divmod(current_minutes, 60)
             if h >= 24:
                 h, m = 23, 59
             new_arrival = time_type(h, m)
 
             await trip_crud.update_itinerary(
-                db, it.id,
+                db, it_id,
                 ItineraryUpdate(arrival_time=new_arrival)
             )
 
             # 다음 장소 도착 시간 = 현재 도착 + 체류 시간 + 다음 장소까지 이동 시간
-            stay = it.stay_duration or 60
-            if i + 1 < len(ordered_itineraries):
-                travel = ordered_itineraries[i + 1].travel_time_from_prev or 15
-            else:
-                travel = 0
+            stay = stays[i]
+            travel = travel_times[i + 1] if i + 1 < len(it_ids) else 0
             current_minutes += stay + travel
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
@@ -1022,9 +1043,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             )
             place_dict = {c['place_id']: c for c in candidates}
             places_by_day = planner._build_places_by_day(draft, place_dict)
-            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
-            constrained, _ = planner.time_service.apply_constraints(
-                optimized, preference, target_date
+            segmented, _ = planner.time_service.structural_split_all(places_by_day)
+            segmented = await planner.route_optimizer.optimize_segments(segmented)
+            constrained, _ = await planner.time_service.apply_time_calculations(
+                segmented, preference, target_date
             )
 
             # 해당 일차 기존 itineraries 삭제
@@ -1074,9 +1096,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             )
             place_dict = {c['place_id']: c for c in candidates}
             places_by_day = planner._build_places_by_day(draft, place_dict)
-            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
-            constrained, _ = planner.time_service.apply_constraints(
-                optimized, preference, trip.start_date
+            segmented, _ = planner.time_service.structural_split_all(places_by_day)
+            segmented = await planner.route_optimizer.optimize_segments(segmented)
+            constrained, _ = await planner.time_service.apply_time_calculations(
+                segmented, preference, trip.start_date
             )
 
             # 모든 기존 itineraries 삭제
@@ -1150,6 +1173,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             ft = next((it.arrival_time for it in its if it.arrival_time is not None), None)
             start_times[day] = (ft.hour if ft else 9, ft.minute if ft else 0)
 
+        # commit 후 ORM 객체가 expire되므로 order_index를 미리 추출 (sort key에서 사용)
+        days_order: dict[int, dict[int, int]] = {
+            day: {it.id: it.order_index for it in its}
+            for day, its in days_snapshot.items()
+        }
+
         # 순서만 맞교환 (일차도 다를 수 있으므로 day_number도 교환)
         await trip_crud.update_itinerary(
             db, it_a.id,
@@ -1177,7 +1206,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             new_its_sorted = sorted(new_its, key=lambda x: (
                 order_b if x.id == it_b.id and day == day_a else
                 order_a if x.id == it_a.id and day == day_b else
-                x.order_index
+                days_order[day].get(x.id, x.order_index)  # 미리 추출된 값 사용 (expire 방지)
             ))
             if new_its_sorted:
                 sh, sm = start_times[day]

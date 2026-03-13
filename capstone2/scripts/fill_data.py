@@ -183,8 +183,8 @@ async def main():
     # STEP 1: 음식점 수집 - 이미 9,456개 있어서 생략 (API 할당량 절약)
     # await step1_collect_food()
 
-    # STEP 2: 부족 지역 보완 (충북/충남/울산/대전/대구/광주)
-    await step2_collect_weak_regions()
+    # STEP 2: 지역 보완 - 완료됨, 생략 (API 할당량 절약)
+    # await step2_collect_weak_regions()
 
     # STEP 3: description 업데이트
     await step3_update_descriptions()
