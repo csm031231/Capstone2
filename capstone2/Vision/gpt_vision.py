@@ -6,6 +6,7 @@ from openai import OpenAI
 from typing import Optional
 from core.config import get_config
 from Vision.dto import VisionAnalysisResult, LocationInfo, SceneInfo, VisionResponse, ExifInfo, LocationCandidate
+from Planner.constants import GPT_VISION_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
     try:
         def _call_gpt():
             return client.chat.completions.create(
-                model="gpt-4o",
+                model=config.openai_model,
                 messages=[
                     {
                         "role": "user",
@@ -70,7 +71,7 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
                         ]
                     }
                 ],
-                max_tokens=500
+                max_tokens=GPT_VISION_MAX_TOKENS
             )
 
         response = await asyncio.to_thread(_call_gpt)

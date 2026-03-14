@@ -212,7 +212,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             return self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=1000,
+                max_tokens=GPT_CHAT_MAX_TOKENS,
                 temperature=0.5,
                 response_format={"type": "json_object"}
             )
