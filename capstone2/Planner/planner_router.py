@@ -227,8 +227,11 @@ async def generate_with_photo(
         )
 
     # 사진 정보가 있고, 지역 불일치이고, 아직 확인 전인 경우
+    # photo_city가 한국 지역으로 정규화 가능한 경우만 불일치 확인 (외국 지역으로 오인식 시 불필요한 clarification 방지)
+    photo_city_norm = _normalize_region(request.photo_city) if request.photo_city else None
     if (
         request.photo_city
+        and photo_city_norm is not None  # 인식된 한국 지역명일 때만
         and not request.use_photo_themes
         and not _regions_match(request.photo_city, request.region)
     ):
@@ -251,17 +254,17 @@ async def generate_with_photo(
             suggested_themes=suggested_themes,
         )
 
-    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    # 테마 합성: 사진 분위기는 항상 반영 (외국 사진이어도 분위기는 국내 일정에 적용)
     merged_themes = list(request.themes)
-    if request.use_photo_themes and request.photo_scene_types:
+    if request.photo_scene_types:
         photo_themes = _extract_themes_from_scene(request.photo_scene_types)
         for t in photo_themes:
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가
+    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
     must_visit = list(request.must_visit_places)
-    if request.photo_landmark:
+    if request.photo_landmark and photo_city_norm is not None:
         landmark_id = await _find_landmark_place_id(db, request.photo_landmark, request.region)
         if landmark_id and landmark_id not in must_visit:
             must_visit.insert(0, landmark_id)
@@ -375,7 +378,14 @@ async def generate_with_photo_upload(
     photo_scene_types = analysis.scene_type or []
 
     # 지역 불일치 확인 (use_photo_themes=false이고 아직 확인 안 된 경우)
-    if photo_city and not use_photo_themes and not _regions_match(photo_city, region):
+    # photo_city가 한국 지역으로 정규화 가능하고, confidence가 충분할 때만 clarification 표시
+    photo_city_norm = _normalize_region(photo_city) if photo_city else None
+    if (
+        photo_city
+        and (photo_city_norm is not None or analysis.confidence >= 0.6)
+        and not use_photo_themes
+        and not _regions_match(photo_city, region)
+    ):
         photo_label = photo_landmark or photo_city
         suggested_themes = _extract_themes_from_scene(photo_scene_types)
 
@@ -397,16 +407,16 @@ async def generate_with_photo_upload(
             suggested_themes=suggested_themes,
         )
 
-    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    # 테마 합성: 사진 분위기는 항상 반영 (외국 사진이어도 분위기는 국내 일정에 적용)
     merged_themes = list(themes_list)
-    if use_photo_themes and photo_scene_types:
+    if photo_scene_types:
         for t in _extract_themes_from_scene(photo_scene_types):
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가
+    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
     must_visit = list(must_visit_list)
-    if photo_landmark:
+    if photo_landmark and photo_city_norm is not None:
         landmark_id = await _find_landmark_place_id(db, photo_landmark, region)
         if landmark_id and landmark_id not in must_visit:
             must_visit.insert(0, landmark_id)
