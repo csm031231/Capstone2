@@ -20,6 +20,7 @@ from Planner.dto import (
 from Planner.planner_service import get_planner_service
 from Planner.chat_service import get_chat_service
 from Planner.route_optimizer import get_route_optimizer
+from Planner.constants import REGION_ALIASES
 from Trip import crud as trip_crud
 
 
@@ -100,24 +101,6 @@ SCENE_TO_THEME = {
     "rural": "전통", "village": "전통",
     "theme_park": "테마파크", "amusement": "테마파크",
 }
-
-# 지역명 정규화 (영문/한문 → 대표 한국어)
-REGION_ALIASES = {
-    "서울": ["seoul", "서울", "서울특별시"],
-    "부산": ["busan", "부산", "부산광역시"],
-    "제주": ["jeju", "제주도", "제주특별자치도"],
-    "강원": ["gangwon", "강원", "강원도"],
-    "경기": ["gyeonggi", "경기", "경기도"],
-    "인천": ["incheon", "인천", "인천광역시"],
-    "대구": ["daegu", "대구", "대구광역시"],
-    "광주": ["gwangju", "광주", "광주광역시"],
-    "대전": ["daejeon", "대전", "대전광역시"],
-    "경북": ["gyeongbuk", "경북", "경상북도"],
-    "경남": ["gyeongnam", "경남", "경상남도"],
-    "전북": ["jeonbuk", "전북", "전라북도"],
-    "전남": ["jeonnam", "전남", "전라남도"],
-}
-
 
 def _normalize_region(name: str) -> Optional[str]:
     """도시/지역명을 대표 한국어 지역명으로 정규화"""
@@ -244,8 +227,11 @@ async def generate_with_photo(
         )
 
     # 사진 정보가 있고, 지역 불일치이고, 아직 확인 전인 경우
+    # photo_city가 한국 지역으로 정규화 가능한 경우만 불일치 확인 (외국 지역으로 오인식 시 불필요한 clarification 방지)
+    photo_city_norm = _normalize_region(request.photo_city) if request.photo_city else None
     if (
         request.photo_city
+        and photo_city_norm is not None  # 인식된 한국 지역명일 때만
         and not request.use_photo_themes
         and not _regions_match(request.photo_city, request.region)
     ):
@@ -268,17 +254,17 @@ async def generate_with_photo(
             suggested_themes=suggested_themes,
         )
 
-    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    # 테마 합성: 사진 분위기는 항상 반영 (외국 사진이어도 분위기는 국내 일정에 적용)
     merged_themes = list(request.themes)
-    if request.use_photo_themes and request.photo_scene_types:
+    if request.photo_scene_types:
         photo_themes = _extract_themes_from_scene(request.photo_scene_types)
         for t in photo_themes:
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가
+    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
     must_visit = list(request.must_visit_places)
-    if request.photo_landmark:
+    if request.photo_landmark and photo_city_norm is not None:
         landmark_id = await _find_landmark_place_id(db, request.photo_landmark, request.region)
         if landmark_id and landmark_id not in must_visit:
             must_visit.insert(0, landmark_id)
@@ -392,7 +378,14 @@ async def generate_with_photo_upload(
     photo_scene_types = analysis.scene_type or []
 
     # 지역 불일치 확인 (use_photo_themes=false이고 아직 확인 안 된 경우)
-    if photo_city and not use_photo_themes and not _regions_match(photo_city, region):
+    # photo_city가 한국 지역으로 정규화 가능하고, confidence가 충분할 때만 clarification 표시
+    photo_city_norm = _normalize_region(photo_city) if photo_city else None
+    if (
+        photo_city
+        and (photo_city_norm is not None or analysis.confidence >= 0.6)
+        and not use_photo_themes
+        and not _regions_match(photo_city, region)
+    ):
         photo_label = photo_landmark or photo_city
         suggested_themes = _extract_themes_from_scene(photo_scene_types)
 
@@ -414,16 +407,16 @@ async def generate_with_photo_upload(
             suggested_themes=suggested_themes,
         )
 
-    # 테마 합성: 사진 분위기 + 사용자 지정 테마
+    # 테마 합성: 사진 분위기는 항상 반영 (외국 사진이어도 분위기는 국내 일정에 적용)
     merged_themes = list(themes_list)
-    if use_photo_themes and photo_scene_types:
+    if photo_scene_types:
         for t in _extract_themes_from_scene(photo_scene_types):
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가
+    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
     must_visit = list(must_visit_list)
-    if photo_landmark:
+    if photo_landmark and photo_city_norm is not None:
         landmark_id = await _find_landmark_place_id(db, photo_landmark, region)
         if landmark_id and landmark_id not in must_visit:
             must_visit.insert(0, landmark_id)

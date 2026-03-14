@@ -9,6 +9,7 @@ from Recommend.preference_service import (
     calculate_preference_weight,
     normalize_themes
 )
+from Planner.constants import REGION_PREFIX, WEEKDAY_KR, WEEKDAY_EN
 
 
 class ConditionRecommender:
@@ -114,9 +115,10 @@ class ConditionRecommender:
         """DB 필터링"""
         query = select(Place)
 
-        # 지역 필터
+        # 지역 필터 (전라도→전라, 경상도→경상, 충청도→충청으로 확장 매칭)
         if condition.region:
-            query = query.where(Place.address.contains(condition.region))
+            search_region = REGION_PREFIX.get(condition.region, condition.region)
+            query = query.where(Place.address.contains(search_region))
 
         # 카테고리 필터
         if condition.categories:
@@ -262,8 +264,7 @@ class ConditionRecommender:
             return False
 
         weekday = check_date.weekday()
-        weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-        today_name = weekday_names[weekday]
+        today_name = WEEKDAY_KR[weekday]
 
         closed_lower = closed_days.lower()
 
@@ -272,8 +273,7 @@ class ConditionRecommender:
             return True
 
         # 영어 요일도 체크
-        eng_weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-        if eng_weekdays[weekday] in closed_lower:
+        if WEEKDAY_EN[weekday] in closed_lower:
             return True
 
         return False
@@ -300,7 +300,8 @@ class ConditionRecommender:
             reasons.append(f"카테고리: {place.category}")
 
         # 지역 매칭
-        if condition.region and condition.region in (place.address or ""):
+        _search_region = REGION_PREFIX.get(condition.region, condition.region) if condition.region else None
+        if _search_region and _search_region in (place.address or ""):
             reasons.append(f"지역: {condition.region}")
 
         # 선호도 매칭

@@ -1,8 +1,15 @@
 import logging
+import math
 from datetime import datetime, time, timedelta, date
 from typing import List, Dict, Optional, Tuple, Any
 
 from core.models import UserPreference
+from services.kakao_service import get_route_info
+from Planner.constants import (
+    WEEKDAY_KR, WEEKDAY_EN,
+    DEFAULT_DAY_START, DEFAULT_DAY_END,
+    LUNCH_START, LUNCH_END, DINNER_START, NIGHT_START,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,122 +50,164 @@ class TimeConstraintService:
         }
     }
 
-    def apply_constraints(
+    # ── 구조 분리 ─────────────────────────────────────────────────────────────
+
+    def _is_night_place(self, p: dict) -> bool:
+        """야경/야간 장소 여부 판별.
+
+        우선순위:
+        1. GPT가 is_night=true로 명시 → 카테고리 무관하게 야간 취급
+        2. 태그/이름에 야간 키워드 포함 → 야간 취급 (단, 명확한 비야간 카테고리 제외)
+        """
+        # GPT가 명시적으로 야간 장소로 표시한 경우 우선 신뢰
+        if p.get('is_night_place', False):
+            return True
+
+        NON_NIGHT_CATEGORIES = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
+        category = (p.get('place_category') or p.get('category') or '')
+        if category in NON_NIGHT_CATEGORIES:
+            return False
+
+        tags = p.get('tags') or []
+        name = (p.get('place_name') or p.get('name', '')).lower()
+        return (
+            any(kw in t.lower() for t in tags for kw in self.NIGHT_KEYWORDS)
+            or any(kw in name for kw in self.NIGHT_KEYWORDS)
+        )
+
+    @staticmethod
+    def _is_meal_place(p: dict) -> bool:
+        """식사 장소 여부 판별"""
+        cat = p.get('place_category') or p.get('category') or ''
+        return cat in ('맛집', '식당')
+
+    def _split_day_places(
+        self, day_num: int, places: List[dict]
+    ) -> Tuple[Dict[str, List[dict]], List[str]]:
+        """하루 장소를 세그먼트로 분리 (아침/점심/오후/저녁/야경).
+
+        Returns:
+            (segments, warnings)
+            segments = {'morning': [...], 'lunch': [...], 'afternoon': [...], 'dinner': [...], 'night': [...]}
+        """
+        night_places = [p for p in places if self._is_night_place(p)]
+        meals = [p for p in places if self._is_meal_place(p) and not self._is_night_place(p)]
+        others = [p for p in places if not self._is_meal_place(p) and not self._is_night_place(p)]
+
+        lunch = meals[0] if meals else None
+        dinner = meals[1] if len(meals) >= 2 else None
+
+        warnings = []
+        if not lunch:
+            warnings.append(f"{day_num}일차: 점심 식당이 없습니다")
+        if not dinner:
+            warnings.append(f"{day_num}일차: 저녁 식당이 없습니다")
+
+        split = min(len(others) // 2, 2)
+        afternoon = others[split:]
+
+        # 야경 장소가 없고 오후 장소가 2개 이상이면 마지막 오후 장소를 저녁 이후로 이동
+        # (저녁 식사 후 빈 시간 방지 — 야경 전용 제약 없이 자연스럽게 배치됨)
+        if not night_places and len(afternoon) >= 2:
+            night_places = [afternoon.pop()]
+
+        return {
+            'morning':   others[:split],
+            'lunch':     [lunch] if lunch else [],
+            'afternoon': afternoon,
+            'dinner':    [dinner] if dinner else [],
+            'night':     night_places,
+        }, warnings
+
+    def structural_split_all(
+        self, places_by_day: Dict[int, List[dict]]
+    ) -> Tuple[Dict[int, Dict[str, List[dict]]], List[str]]:
+        """전체 일정을 세그먼트로 분리 (시간 계산 없음).
+
+        Returns:
+            (segmented_by_day, warnings)
+            segmented_by_day = {day_num: {'morning': [...], 'lunch': [...], ...}}
+        """
+        segmented: Dict[int, Dict[str, List[dict]]] = {}
+        all_warnings: List[str] = []
+        for day_num, places in places_by_day.items():
+            segments, warnings = self._split_day_places(day_num, places)
+            segmented[day_num] = segments
+            all_warnings.extend(warnings)
+        return segmented, all_warnings
+
+    # ── 시간 계산 ─────────────────────────────────────────────────────────────
+
+    async def apply_time_calculations(
         self,
-        places_by_day: Dict[int, List[dict]],
+        segmented_by_day: Dict[int, Dict[str, List[dict]]],
         preference: Optional[UserPreference],
         start_date: date
     ) -> Tuple[Dict[int, List[dict]], List[str]]:
-        """
-        시간 제약 적용
+        """세그먼트화된 일정에 도착 시간 / 체류 시간 / 영업시간 제약 적용.
 
-        1. 영업시간 체크
-        2. 휴무일 체크 (must-visit은 경고만)
-        3. 체류 시간 배정
-        4. 도착 시간 계산
-
-        Returns:
-            (places_by_day, warnings) 튜플
+        segmented_by_day 는 structural_split_all 또는 route_optimizer.optimize_segments 의 출력.
         """
-        # 시간 설정
         if preference:
-            day_start = preference.preferred_start_time or time(9, 0)
-            day_end = preference.preferred_end_time or time(23, 0)
+            day_start = preference.preferred_start_time or DEFAULT_DAY_START
+            day_end = preference.preferred_end_time or DEFAULT_DAY_END
             pace = preference.travel_pace or "moderate"
         else:
-            day_start = time(9, 0)
-            day_end = time(23, 0)
+            day_start = DEFAULT_DAY_START
+            day_end = DEFAULT_DAY_END
             pace = "moderate"
 
         pace_config = self.PACE_CONFIG.get(pace, self.PACE_CONFIG["moderate"])
+        result: Dict[int, List[dict]] = {}
+        warnings: List[str] = []
 
-        result = {}
-        warnings = []
-
-        for day_num, places in places_by_day.items():
+        for day_num, segments in segmented_by_day.items():
             current_date = start_date + timedelta(days=int(day_num) - 1)
             current_time = datetime.combine(current_date, day_start)
             end_datetime = datetime.combine(current_date, day_end)
 
-            # 식사/야경 구조 강제 재배치:
-            # 오전(others 전반) → 점심 식당 → 오후(others 후반) → 저녁 식당 → 야경
-            NON_NIGHT_CATEGORIES = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
+            # 세그먼트 결합 (순서 고정: 아침 → 점심 → 오후 → 저녁 → 야경)
+            places = (
+                segments.get('morning', []) +
+                segments.get('lunch', []) +
+                segments.get('afternoon', []) +
+                segments.get('dinner', []) +
+                segments.get('night', [])
+            )
 
-            def _is_night(p):
-                category = (p.get('place_category') or p.get('category') or '')
-                if category in NON_NIGHT_CATEGORIES:
-                    return False
-                tags = p.get('tags') or []
-                name = (p.get('place_name') or p.get('name', '')).lower()
-                return (
-                    p.get('is_night_place', False)
-                    or any(kw in t.lower() for t in tags for kw in self.NIGHT_KEYWORDS)
-                    or any(kw in name for kw in self.NIGHT_KEYWORDS)
-                )
-
-            def _is_meal(p):
-                cat = p.get('place_category') or p.get('category') or ''
-                return cat in ('맛집', '식당')
-
-            night_places = [p for p in places if _is_night(p)]
-            meals = [p for p in places if _is_meal(p) and not _is_night(p)]
-            others = [p for p in places if not _is_meal(p) and not _is_night(p)]
-
-            # 식당 최대 2개 (초과분은 버림)
-            lunch = meals[0] if len(meals) >= 1 else None
-            dinner = meals[1] if len(meals) >= 2 else None
-
-            # others를 오전/오후로 분리 (오전은 최대 2개: 9시부터 너무 많으면 점심이 14시 이후로 밀림)
-            split = min(len(others) // 2, 2)
-            morning = others[:split]
-            afternoon = others[split:]
-
-            # 재구성: 오전 → 점심 → 오후 → 저녁 → 야경
-            places = morning
-            if lunch:
-                places = places + [lunch]
-            places = places + afternoon
-            if dinner:
-                places = places + [dinner]
-            places = places + night_places
+            # 최종 순서 기반 이동시간 재계산 (Kakao API)
+            await self._recalculate_travel_times(places)
 
             day_itineraries = []
 
-            for i, place in enumerate(places):
+            for place in places:
                 is_must_visit = place.get('must_visit', False)
                 place_name = place.get('place_name') or place.get('name', '알 수 없음')
 
-                # 이동 시간 반영: 이전 장소 체류 종료 후 현재 장소까지의 이동시간을 더함
                 travel_time = place.get('travel_time_from_prev', 0) or 0
                 arrival_time = current_time + timedelta(minutes=travel_time)
 
-                # 맛집/식당: 점심(12:00~13:00) 또는 저녁(18:30~19:30) 시간대에만 배치
+                # 식사 시간대 push
                 place_category = place.get('place_category') or place.get('category') or ''
                 if place_category in ('맛집', '식당'):
                     t = arrival_time.time()
-                    lunch_start = time(12, 0)
-                    lunch_end = time(14, 0)
-                    dinner_start = time(18, 30)
-                    if t < lunch_start:
-                        # 점심 시간으로 push
-                        meal_time = datetime.combine(current_date, lunch_start)
+                    if t < LUNCH_START:
+                        meal_time = datetime.combine(current_date, LUNCH_START)
                         arrival_time = meal_time
                         if current_time < meal_time:
                             current_time = meal_time
-                    elif lunch_end <= t < dinner_start:
-                        # 오후 중간 시간이면 저녁 시간으로 push
-                        meal_time = datetime.combine(current_date, dinner_start)
+                    elif LUNCH_END <= t < DINNER_START:
+                        meal_time = datetime.combine(current_date, DINNER_START)
                         arrival_time = meal_time
                         if current_time < meal_time:
                             current_time = meal_time
 
-                # 야경/야간 장소: 20:00 이전 도착 불가 (위에서 이미 마지막으로 재정렬됨)
-                is_night_place = _is_night(place)
-                if is_night_place and arrival_time.time() < time(20, 0):
-                    night_start = datetime.combine(current_date, time(20, 0))
-                    arrival_time = night_start
-                    if current_time < night_start:
-                        current_time = night_start
+                # 야경 NIGHT_START 이전 불가
+                if self._is_night_place(place) and arrival_time.time() < NIGHT_START:
+                    night_dt = datetime.combine(current_date, NIGHT_START)
+                    arrival_time = night_dt
+                    if current_time < night_dt:
+                        current_time = night_dt
 
                 # 휴무일 체크
                 if self._is_closed(place.get('closed_days'), current_date):
@@ -170,15 +219,9 @@ class TimeConstraintService:
                         continue
 
                 # 영업시간 체크
-                opens, closes = self._parse_operating_hours(
-                    place.get('operating_hours')
-                )
-
-                # 영업 시작 시간까지 대기
+                opens, closes = self._parse_operating_hours(place.get('operating_hours'))
                 if opens and arrival_time.time() < opens:
                     arrival_time = datetime.combine(current_date, opens)
-
-                # 영업 종료 확인
                 if closes and arrival_time.time() >= closes:
                     if is_must_visit:
                         warnings.append(
@@ -187,7 +230,7 @@ class TimeConstraintService:
                     else:
                         continue
 
-                # 체류 시간 결정: GPT 제안값 우선, 없으면 카테고리 기본값 사용
+                # 체류 시간 결정
                 category = place.get('place_category') or place.get('category')
                 base_duration = self.DEFAULT_STAY_DURATION.get(category, 60)
                 gpt_suggested = place.get('suggested_stay_duration')
@@ -196,8 +239,6 @@ class TimeConstraintService:
                 else:
                     stay_duration = int(base_duration * pace_config["stay_multiplier"])
 
-                # 종료 시간 확인 - 도착 시간이 종료 시간 이후면 스킵
-                # (체류가 종료 시간을 넘는 건 허용 - 도착만 하면 됨)
                 finish_time = arrival_time + timedelta(minutes=stay_duration)
                 if arrival_time >= end_datetime:
                     if is_must_visit:
@@ -207,25 +248,34 @@ class TimeConstraintService:
                     else:
                         continue
                 elif finish_time > end_datetime:
-                    warnings.append(
-                        f"{day_num}일차: {place_name} 방문이 선호 종료 시간을 초과합니다"
-                    )
+                    warnings.append(f"{day_num}일차: {place_name} 방문이 선호 종료 시간을 초과합니다")
 
-                # 일정 추가
                 place['suggested_arrival_time'] = arrival_time.time()
                 place['suggested_stay_duration'] = stay_duration
                 day_itineraries.append(place)
-
-                # 다음 장소 기준 시간 = 현재 체류 종료 + 버퍼
                 current_time = finish_time + timedelta(minutes=pace_config["buffer_time"])
 
-            # order_index를 실제 처리 순서(도착 시간 순)로 재부여
             for idx, place in enumerate(day_itineraries):
                 place['order_index'] = idx + 1
 
             result[day_num] = day_itineraries
 
         return result, warnings
+
+    async def apply_constraints(
+        self,
+        places_by_day: Dict[int, List[dict]],
+        preference: Optional[UserPreference],
+        start_date: date
+    ) -> Tuple[Dict[int, List[dict]], List[str]]:
+        """편의 메서드: 구조 분리 + 시간 계산 (route_optimizer 없이).
+        chat_service 재생성 등 단순 경로에서 사용.
+        """
+        segmented, structural_warnings = self.structural_split_all(places_by_day)
+        constrained, time_warnings = await self.apply_time_calculations(
+            segmented, preference, start_date
+        )
+        return constrained, structural_warnings + time_warnings
 
     def validate_schedule(
         self,
@@ -247,9 +297,9 @@ class TimeConstraintService:
         errors = []
 
         if preference:
-            day_end = preference.preferred_end_time or time(23, 0)
+            day_end = preference.preferred_end_time or DEFAULT_DAY_END
         else:
-            day_end = time(23, 0)
+            day_end = DEFAULT_DAY_END
 
         for day_num, places in places_by_day.items():
             if isinstance(day_num, str) and day_num.startswith('_'):
@@ -335,11 +385,8 @@ class TimeConstraintService:
             return False
 
         weekday = check_date.weekday()
-        weekday_names_kr = ["월", "화", "수", "목", "금", "토", "일"]
-        weekday_names_en = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-
-        today_kr = weekday_names_kr[weekday]
-        today_en = weekday_names_en[weekday]
+        today_kr = WEEKDAY_KR[weekday]
+        today_en = WEEKDAY_EN[weekday]
 
         closed_lower = closed_days.lower()
 
@@ -356,6 +403,66 @@ class TimeConstraintService:
             return True
 
         return False
+
+    async def _recalculate_travel_times(self, places: List[dict]) -> None:
+        """재정렬된 장소 순서에 맞게 travel_time_from_prev 재계산.
+        Kakao 경로 API 우선, 실패 시 Haversine 폴백.
+        """
+        for i, place in enumerate(places):
+            if i == 0:
+                place['travel_time_from_prev'] = 0
+                place['transport_mode'] = None
+                continue
+
+            prev = places[i - 1]
+            prev_lng = prev.get('longitude') or 0
+            prev_lat = prev.get('latitude') or 0
+            curr_lng = place.get('longitude') or 0
+            curr_lat = place.get('latitude') or 0
+
+            travel_time = 15
+            transport_mode = 'public_transit'
+
+            if prev_lng and prev_lat and curr_lng and curr_lat:
+                try:
+                    route_info = await get_route_info(prev_lng, prev_lat, curr_lng, curr_lat)
+                    duration = route_info.get('duration', 0)
+                    distance = route_info.get('distance', 0)
+
+                    if duration > 0:
+                        travel_time = max(int(duration / 60), 1)
+                        dist_km = distance / 1000
+                        if dist_km < 0.5:
+                            transport_mode = 'walk'
+                        elif dist_km < 5:
+                            transport_mode = 'public_transit'
+                        else:
+                            transport_mode = 'car'
+                    else:
+                        travel_time, transport_mode = self._haversine_fallback(
+                            prev_lat, prev_lng, curr_lat, curr_lng
+                        )
+                except Exception:
+                    travel_time, transport_mode = self._haversine_fallback(
+                        prev_lat, prev_lng, curr_lat, curr_lng
+                    )
+
+            place['travel_time_from_prev'] = max(travel_time, 5)
+            place['transport_mode'] = transport_mode
+
+    @staticmethod
+    def _haversine_fallback(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[int, str]:
+        """Haversine 직선거리 기반 이동시간/수단 추정"""
+        lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+        a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+        dist_km = 6371 * 2 * math.asin(math.sqrt(a))
+
+        if dist_km < 0.5:
+            return max(int(dist_km * 1000 / 80), 5), 'walk'
+        elif dist_km < 5:
+            return int(dist_km / 20 * 60) + 5, 'public_transit'
+        else:
+            return int(dist_km / 30 * 60) + 10, 'car'
 
     def get_recommended_stay_duration(
         self,

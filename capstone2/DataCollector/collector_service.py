@@ -307,7 +307,7 @@ class DataCollectorService:
         )
         remaining_before = count_result.scalar() or 0
 
-        # 이번 배치 대상 조회
+        # 이번 배치 대상 조회 (readcount 내림차순 - 인기 장소 우선)
         result = await db.execute(
             select(Place).where(
                 and_(
@@ -315,7 +315,7 @@ class DataCollectorService:
                     Place.content_id.isnot(None),
                     Place.content_type_id.isnot(None)
                 )
-            ).limit(batch_size)
+            ).order_by(Place.readcount.desc().nullslast()).limit(batch_size)
         )
         places = result.scalars().all()
 

@@ -6,6 +6,7 @@ CLIP 모델 서비스
 import threading
 import logging
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 from typing import List, Optional
@@ -72,8 +73,12 @@ class CLIPService:
             # 이미지 임베딩 추출
             image_features = CLIPService._model.get_image_features(**inputs)
 
+            # 버전에 따라 tensor 또는 ModelOutput 반환 — tensor로 통일
+            if not isinstance(image_features, torch.Tensor):
+                image_features = image_features.pooler_output
+
             # 정규화 (코사인 유사도 계산용)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            image_features = F.normalize(image_features, dim=-1)
 
             return image_features.cpu().numpy().flatten()
 
@@ -100,7 +105,12 @@ class CLIPService:
             ).to(CLIPService._device)
 
             text_features = CLIPService._model.get_text_features(**inputs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+            # 버전에 따라 tensor 또는 ModelOutput 반환 — tensor로 통일
+            if not isinstance(text_features, torch.Tensor):
+                text_features = text_features.pooler_output
+
+            text_features = F.normalize(text_features, dim=-1)
 
             return text_features.cpu().numpy().flatten()
 

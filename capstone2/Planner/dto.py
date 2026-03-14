@@ -153,7 +153,7 @@ class ChatRequest(BaseModel):
 
 class ChangeItem(BaseModel):
     """변경 항목"""
-    action: Literal["add", "remove", "replace", "reorder", "modify", "regenerate", "optimize_route", "swap_places", "swap_days"]
+    action: Literal["add", "remove", "replace", "reorder", "modify", "regenerate", "optimize_route", "swap_places", "swap_days", "change_duration"]
     details: Dict[str, Any]
 
 

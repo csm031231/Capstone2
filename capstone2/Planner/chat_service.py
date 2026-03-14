@@ -11,6 +11,7 @@ from core.config import get_config
 from core.models import ChatSession, Itinerary, Place, Trip
 from Trip import crud as trip_crud
 from Planner.dto import ChatRequest, ChatResponse, ChatMessage, ChangeItem
+from Planner.constants import REGION_PREFIX, CHAT_CONTEXT_LIMIT, CHAT_STORAGE_LIMIT, GPT_CHAT_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class ChatService:
 - modify: 시간/메모 수정
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
+- change_duration: 여행 전체 기간(일수) 변경 — 늘리거나 줄이기
+  (new_total_days: 새 총 일수 / delta_days: 증감일수, 양수=늘리기, 음수=줄이기)
+  늘릴 때는 추가 일차 일정을 자동 생성, 줄일 때는 마지막 일차부터 삭제
 - optimize_route: 현재 장소는 유지하고 이동 동선만 최적화
 - question: 추가 정보 필요
 
@@ -46,6 +50,7 @@ class ChatService:
 - "A를 첫 번째로", "B를 3번째로" 등 특정 장소를 특정 위치로 이동 → reorder (new_order에 반드시 정확한 위치 번호)
 - "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
+- "하루 더", "이틀 줄여", "3박4일로 바꿔", "N일 늘려줘", "N박N일로 변경" 등 기간 자체 변경 → change_duration
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
 - "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
 - 요청이 너무 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true로 설정하고 response_message에서 선호도를 되물어봄
@@ -53,7 +58,7 @@ class ChatService:
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|change_duration|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -134,11 +139,21 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}
 
 사용자: "카페빼고 식당 2개 넣어줘"
-응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}"""
+응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}
+
+사용자: "하루 더 추가해줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": 1}], "response_message": "여행을 하루 늘려서 새 일차 일정을 만들게요!", "needs_confirmation": false}
+
+사용자: "5박6일을 3박4일로 줄여줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "new_total_days": 4}], "response_message": "여행을 4일로 줄이고 마지막 일차 일정을 삭제할게요!", "needs_confirmation": false}
+
+사용자: "이틀 줄여줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": -2}], "response_message": "여행을 이틀 줄이고 마지막 두 일차 일정을 삭제할게요!", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
         self.client = OpenAI(api_key=config.openai_api_key)
+        self.model = config.openai_model
 
     async def process_message(
         self,
@@ -184,9 +199,9 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             {"role": "system", "content": f"## 추가 가능한 장소\n{places_context}"}
         ]
 
-        # 이전 대화 추가 (최근 10개)
+        # 이전 대화 추가 (최근 CHAT_CONTEXT_LIMIT개)
         if session.messages:
-            for msg in session.messages[-10:]:
+            for msg in session.messages[-CHAT_CONTEXT_LIMIT:]:
                 messages.append(msg)
 
         # 새 메시지 추가
@@ -195,9 +210,9 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # 6. GPT 호출 (파싱 실패 시 최대 2회 재시도)
         def _call_gpt():
             return self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self.model,
                 messages=messages,
-                max_tokens=1000,
+                max_tokens=GPT_CHAT_MAX_TOKENS,
                 temperature=0.5,
                 response_format={"type": "json_object"}
             )
@@ -318,8 +333,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         messages.append({"role": "user", "content": user_message})
         messages.append({"role": "assistant", "content": assistant_response})
 
-        # 최근 20개만 유지
-        session.messages = messages[-20:]
+        # 최근 CHAT_STORAGE_LIMIT개만 유지
+        session.messages = messages[-CHAT_STORAGE_LIMIT:]
         # JSON 컬럼(list)의 내부 변경을 SQLAlchemy가 감지하도록 명시적으로 표시
         flag_modified(session, "messages")
         await db.commit()
@@ -379,12 +394,14 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         collected: List[Place] = []
         seen_ids: set = set()
 
+        search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+
         # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
             for cat in categories:
                 query = select(Place)
-                if trip.region:
-                    query = query.where(Place.address.contains(trip.region))
+                if search_region:
+                    query = query.where(Place.address.contains(search_region))
                 query = (
                     query
                     .where(Place.category == cat)
@@ -400,8 +417,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 50개 → 토큰 절약)
         if len(collected) < 30:
             query = select(Place)
-            if trip.region:
-                query = query.where(Place.address.contains(trip.region))
+            if search_region:
+                query = query.where(Place.address.contains(search_region))
             query = (
                 query
                 .order_by(nulls_last(Place.readcount.desc()))
@@ -475,10 +492,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         import re as _re
         from sqlalchemy import nulls_last
 
+        search_region = REGION_PREFIX.get(region, region) if region else None
+
         # 1. 정확 매칭 (지역 필터 포함)
         q = select(Place).where(Place.name == name)
-        if region:
-            q = q.where(Place.address.contains(region))
+        if search_region:
+            q = q.where(Place.address.contains(search_region))
         result = await db.execute(q)
         place = result.scalar_one_or_none()
         if place:
@@ -486,8 +505,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         # 2. 포함 매칭 (지역 필터 포함, 인기순)
         q = select(Place).where(Place.name.contains(name))
-        if region:
-            q = q.where(Place.address.contains(region))
+        if search_region:
+            q = q.where(Place.address.contains(search_region))
         q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
         result = await db.execute(q)
         place = result.scalar_one_or_none()
@@ -510,8 +529,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         tokens = sorted(_re.findall(r'[가-힣]{2,}', name), key=len, reverse=True)
         for token in tokens[:2]:
             q = select(Place).where(Place.name.contains(token))
-            if region:
-                q = q.where(Place.address.contains(region))
+            if search_region:
+                q = q.where(Place.address.contains(search_region))
             q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
             result = await db.execute(q)
             place = result.scalar_one_or_none()
@@ -669,6 +688,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     if result:
                         applied_changes.append(result)
 
+                elif action == "change_duration":
+                    result = await self._apply_change_duration(db, user_id, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
                 elif action == "optimize_route":
                     result = await self._apply_optimize_route(db, user_id, trip)
                     if result:
@@ -764,17 +788,22 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         removed_day = target.day_number
         removed_name = target.place.name
+
+        # delete commit 전에 같은 날 나머지 장소의 (id, order_index) 미리 추출
+        # (commit 후 ORM 객체 속성이 expire되어 MissingGreenlet 발생 방지)
+        from Trip.dto import ItineraryUpdate
+        same_day_pairs = sorted(
+            [(it.id, it.order_index) for it in trip.itineraries
+             if it.id != target.id and it.day_number == removed_day],
+            key=lambda x: x[1]
+        )
+
         await trip_crud.delete_itinerary(db, target.id)
 
         # 같은 날 남은 장소들을 1부터 연속 재정렬 (구멍 방지)
-        from Trip.dto import ItineraryUpdate
-        same_day = sorted(
-            [it for it in trip.itineraries if it.id != target.id and it.day_number == removed_day],
-            key=lambda x: x.order_index
-        )
-        for idx, it in enumerate(same_day, start=1):
-            if it.order_index != idx:
-                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+        for idx, (it_id, current_order) in enumerate(same_day_pairs, start=1):
+            if current_order != idx:
+                await trip_crud.update_itinerary(db, it_id, ItineraryUpdate(order_index=idx))
 
         return {"action": "remove", "place_name": removed_name}
 
@@ -914,25 +943,31 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         if not ordered_itineraries:
             return
 
+        # commit 후 SQLAlchemy가 ORM 객체 속성을 expire 처리하므로
+        # 첫 commit 이전에 필요한 값을 모두 추출해 둔다 (MissingGreenlet 방지)
+        it_ids = [it.id for it in ordered_itineraries]
+        stays = [it.stay_duration or 60 for it in ordered_itineraries]
+        travel_times = [0] + [
+            (ordered_itineraries[i].travel_time_from_prev or 15)
+            for i in range(1, len(ordered_itineraries))
+        ]
+
         current_minutes = start_hour * 60 + start_minute
 
-        for i, it in enumerate(ordered_itineraries):
+        for i, it_id in enumerate(it_ids):
             h, m = divmod(current_minutes, 60)
             if h >= 24:
                 h, m = 23, 59
             new_arrival = time_type(h, m)
 
             await trip_crud.update_itinerary(
-                db, it.id,
+                db, it_id,
                 ItineraryUpdate(arrival_time=new_arrival)
             )
 
             # 다음 장소 도착 시간 = 현재 도착 + 체류 시간 + 다음 장소까지 이동 시간
-            stay = it.stay_duration or 60
-            if i + 1 < len(ordered_itineraries):
-                travel = ordered_itineraries[i + 1].travel_time_from_prev or 15
-            else:
-                travel = 0
+            stay = stays[i]
+            travel = travel_times[i + 1] if i + 1 < len(it_ids) else 0
             current_minutes += stay + travel
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
@@ -1022,9 +1057,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             )
             place_dict = {c['place_id']: c for c in candidates}
             places_by_day = planner._build_places_by_day(draft, place_dict)
-            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
-            constrained, _ = planner.time_service.apply_constraints(
-                optimized, preference, target_date
+            segmented, _ = planner.time_service.structural_split_all(places_by_day)
+            segmented = await planner.route_optimizer.optimize_segments(segmented)
+            constrained, _ = await planner.time_service.apply_time_calculations(
+                segmented, preference, target_date
             )
 
             # 해당 일차 기존 itineraries 삭제
@@ -1074,9 +1110,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             )
             place_dict = {c['place_id']: c for c in candidates}
             places_by_day = planner._build_places_by_day(draft, place_dict)
-            optimized = await planner.route_optimizer.optimize(places_by_day, None, None)
-            constrained, _ = planner.time_service.apply_constraints(
-                optimized, preference, trip.start_date
+            segmented, _ = planner.time_service.structural_split_all(places_by_day)
+            segmented = await planner.route_optimizer.optimize_segments(segmented)
+            constrained, _ = await planner.time_service.apply_time_calculations(
+                segmented, preference, trip.start_date
             )
 
             # 모든 기존 itineraries 삭제
@@ -1150,6 +1187,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             ft = next((it.arrival_time for it in its if it.arrival_time is not None), None)
             start_times[day] = (ft.hour if ft else 9, ft.minute if ft else 0)
 
+        # commit 후 ORM 객체가 expire되므로 order_index를 미리 추출 (sort key에서 사용)
+        days_order: dict[int, dict[int, int]] = {
+            day: {it.id: it.order_index for it in its}
+            for day, its in days_snapshot.items()
+        }
+
         # 순서만 맞교환 (일차도 다를 수 있으므로 day_number도 교환)
         await trip_crud.update_itinerary(
             db, it_a.id,
@@ -1177,7 +1220,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             new_its_sorted = sorted(new_its, key=lambda x: (
                 order_b if x.id == it_b.id and day == day_a else
                 order_a if x.id == it_a.id and day == day_b else
-                x.order_index
+                days_order[day].get(x.id, x.order_index)  # 미리 추출된 값 사용 (expire 방지)
             ))
             if new_its_sorted:
                 sh, sm = start_times[day]
@@ -1234,6 +1277,135 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 await self._recalculate_day_times(db, day_its)
 
         return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
+
+    async def _apply_change_duration(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip,
+        change: dict
+    ) -> Optional[dict]:
+        """여행 기간 변경 (늘리기/줄이기)"""
+        from datetime import timedelta
+        from sqlalchemy import delete as sa_delete, update as sa_update
+        from core.models import Itinerary as ItineraryModel, Trip as TripModel
+        from Planner.dto import GenerateRequest
+        from Planner.planner_service import get_planner_service
+        from Recommend.preference_service import get_user_preference
+
+        current_total_days = (trip.end_date - trip.start_date).days + 1
+
+        # new_total_days 또는 delta_days 로 새 일수 계산
+        new_total_days = change.get("new_total_days")
+        delta_days = change.get("delta_days")
+
+        if new_total_days is not None:
+            new_total_days = int(new_total_days)
+        elif delta_days is not None:
+            new_total_days = current_total_days + int(delta_days)
+        else:
+            return None
+
+        # 1일 미만 또는 14일 초과는 거부
+        if new_total_days < 1 or new_total_days > 14:
+            return None
+
+        if new_total_days == current_total_days:
+            return None
+
+        new_end_date = trip.start_date + timedelta(days=new_total_days - 1)
+
+        if new_total_days < current_total_days:
+            # ── 기간 축소: 마지막 일차부터 삭제 ──
+            days_to_remove = list(range(new_total_days + 1, current_total_days + 1))
+            await db.execute(
+                sa_delete(ItineraryModel).where(
+                    ItineraryModel.trip_id == trip.id,
+                    ItineraryModel.day_number.in_(days_to_remove)
+                )
+            )
+            await db.flush()
+
+            # trip 날짜 업데이트
+            await db.execute(
+                sa_update(TripModel)
+                .where(TripModel.id == trip.id)
+                .values(end_date=new_end_date)
+            )
+            await db.commit()
+
+            return {
+                "action": "change_duration",
+                "old_days": current_total_days,
+                "new_days": new_total_days,
+                "removed_days": days_to_remove,
+            }
+
+        else:
+            # ── 기간 연장: 새 일차 일정 생성 ──
+            existing_place_ids = [it.place_id for it in trip.itineraries]
+            conditions = trip.conditions or {}
+            preference = await get_user_preference(db, user_id)
+            planner = get_planner_service()
+            added_days = []
+
+            for day_num in range(current_total_days + 1, new_total_days + 1):
+                target_date = trip.start_date + timedelta(days=day_num - 1)
+                request = GenerateRequest(
+                    title=trip.title,
+                    region=trip.region,
+                    start_date=target_date,
+                    end_date=target_date,
+                    themes=conditions.get("themes", []),
+                    max_places_per_day=conditions.get("max_places_per_day", 10),
+                    exclude_places=existing_place_ids,
+                )
+
+                candidates = await planner._gather_candidates(db, request, preference, 1)
+                if not candidates:
+                    continue
+
+                draft = await planner._generate_with_gpt(candidates, request, preference, 1)
+                place_dict = {c['place_id']: c for c in candidates}
+                places_by_day = planner._build_places_by_day(draft, place_dict)
+                segmented, _ = planner.time_service.structural_split_all(places_by_day)
+                segmented = await planner.route_optimizer.optimize_segments(segmented)
+                constrained, _ = await planner.time_service.apply_time_calculations(
+                    segmented, preference, target_date
+                )
+
+                itinerary_items = []
+                for _, places in constrained.items():
+                    for place in places:
+                        itinerary_items.append({
+                            "place_id": place["place_id"],
+                            "day_number": day_num,
+                            "order_index": place.get("order_index", 1),
+                            "arrival_time": place.get("suggested_arrival_time"),
+                            "stay_duration": place.get("suggested_stay_duration"),
+                            "travel_time_from_prev": place.get("travel_time_from_prev"),
+                            "transport_mode": place.get("transport_mode"),
+                            "memo": place.get("selection_reason"),
+                        })
+                        existing_place_ids.append(place["place_id"])
+
+                await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
+                added_days.append(day_num)
+
+            # trip 날짜 업데이트
+            await db.execute(
+                sa_update(TripModel)
+                .where(TripModel.id == trip.id)
+                .values(end_date=new_end_date)
+            )
+            await db.commit()
+
+            return {
+                "action": "change_duration",
+                "old_days": current_total_days,
+                "new_days": new_total_days,
+                "added_days": added_days,
+            }
 
     async def _apply_optimize_route(
         self,
