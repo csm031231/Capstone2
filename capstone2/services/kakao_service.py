@@ -13,10 +13,10 @@ async def search_places(keyword: str, page: int = 1, size: int = 5):
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers, params=params)
-            
+
             # 터미널에 로그 찍기 (디버깅용)
             print(f"DEBUG(Search): 상태코드={response.status_code}")
-            
+
             if response.status_code == 200:
                 return response.json().get("documents", [])
             else:
@@ -26,7 +26,7 @@ async def search_places(keyword: str, page: int = 1, size: int = 5):
         print(f"DEBUG(Search): 시스템 에러 -> {e}")
         return []
 
-# 2. 경로 계산 (좌표 -> 시간/거리)
+# 2. 경로 계산 (좌표 -> 시간/거리/도로경로)
 async def get_route_info(origin_x: float, origin_y: float, dest_x: float, dest_y: float):
     url = "https://apis-navi.kakaomobility.com/v1/directions"
     headers = {"Authorization": f"KakaoAK {settings.kakao_rest_api_key}"}
@@ -39,7 +39,7 @@ async def get_route_info(origin_x: float, origin_y: float, dest_x: float, dest_y
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers, params=params)
-            
+
             print(f"DEBUG(Route): 상태코드={response.status_code}")
 
             if response.status_code == 200:
@@ -47,11 +47,26 @@ async def get_route_info(origin_x: float, origin_y: float, dest_x: float, dest_y
                 routes = data.get("routes", [])
                 if routes:
                     summary = routes[0]["summary"]
+
+                    # 도로 경로 좌표 추출
+                    # vertexes는 [lng, lat, lng, lat, ...] 플랫 배열 형태로 반환됨
+                    road_path = []
+                    for section in routes[0].get("sections", []):
+                        for road in section.get("roads", []):
+                            verts = road.get("vertexes", [])
+                            for i in range(0, len(verts) - 1, 2):
+                                road_path.append({
+                                    "lng": verts[i],
+                                    "lat": verts[i + 1]
+                                })
+
                     return {
-                        "duration": summary["duration"], # 초 단위
-                        "distance": summary["distance"]  # 미터 단위
+                        "duration": summary["duration"],  # 초 단위
+                        "distance": summary["distance"],  # 미터 단위
+                        "road_path": road_path            # 실제 도로 좌표 배열
                     }
-            return {"duration": 0, "distance": 0}
+
+        return {"duration": 0, "distance": 0, "road_path": []}
     except Exception as e:
         print(f"DEBUG(Route): 시스템 에러 -> {e}")
-        return {"duration": 0, "distance": 0}
+        return {"duration": 0, "distance": 0, "road_path": []}
