@@ -38,6 +38,9 @@ class ChatService:
 - modify: 시간/메모 수정
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
+- change_duration: 여행 전체 기간(일수) 변경 — 늘리거나 줄이기
+  (new_total_days: 새 총 일수 / delta_days: 증감일수, 양수=늘리기, 음수=줄이기)
+  늘릴 때는 추가 일차 일정을 자동 생성, 줄일 때는 마지막 일차부터 삭제
 - optimize_route: 현재 장소는 유지하고 이동 동선만 최적화
 - question: 추가 정보 필요
 
@@ -47,6 +50,7 @@ class ChatService:
 - "A를 첫 번째로", "B를 3번째로" 등 특정 장소를 특정 위치로 이동 → reorder (new_order에 반드시 정확한 위치 번호)
 - "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
+- "하루 더", "이틀 줄여", "3박4일로 바꿔", "N일 늘려줘", "N박N일로 변경" 등 기간 자체 변경 → change_duration
 - "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
 - "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
 - 요청이 너무 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true로 설정하고 response_message에서 선호도를 되물어봄
@@ -54,7 +58,7 @@ class ChatService:
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|change_duration|optimize_route|question",
   "changes": [
     {
       "action": "add",
@@ -135,7 +139,16 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}
 
 사용자: "카페빼고 식당 2개 넣어줘"
-응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}"""
+응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}
+
+사용자: "하루 더 추가해줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": 1}], "response_message": "여행을 하루 늘려서 새 일차 일정을 만들게요!", "needs_confirmation": false}
+
+사용자: "5박6일을 3박4일로 줄여줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "new_total_days": 4}], "response_message": "여행을 4일로 줄이고 마지막 일차 일정을 삭제할게요!", "needs_confirmation": false}
+
+사용자: "이틀 줄여줘"
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": -2}], "response_message": "여행을 이틀 줄이고 마지막 두 일차 일정을 삭제할게요!", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
@@ -672,6 +685,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
                 elif action == "swap_days":
                     result = await self._apply_swap_days(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
+                elif action == "change_duration":
+                    result = await self._apply_change_duration(db, user_id, trip, change)
                     if result:
                         applied_changes.append(result)
 
@@ -1259,6 +1277,135 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 await self._recalculate_day_times(db, day_its)
 
         return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
+
+    async def _apply_change_duration(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip,
+        change: dict
+    ) -> Optional[dict]:
+        """여행 기간 변경 (늘리기/줄이기)"""
+        from datetime import timedelta
+        from sqlalchemy import delete as sa_delete, update as sa_update
+        from core.models import Itinerary as ItineraryModel, Trip as TripModel
+        from Planner.dto import GenerateRequest
+        from Planner.planner_service import get_planner_service
+        from Recommend.preference_service import get_user_preference
+
+        current_total_days = (trip.end_date - trip.start_date).days + 1
+
+        # new_total_days 또는 delta_days 로 새 일수 계산
+        new_total_days = change.get("new_total_days")
+        delta_days = change.get("delta_days")
+
+        if new_total_days is not None:
+            new_total_days = int(new_total_days)
+        elif delta_days is not None:
+            new_total_days = current_total_days + int(delta_days)
+        else:
+            return None
+
+        # 1일 미만 또는 14일 초과는 거부
+        if new_total_days < 1 or new_total_days > 14:
+            return None
+
+        if new_total_days == current_total_days:
+            return None
+
+        new_end_date = trip.start_date + timedelta(days=new_total_days - 1)
+
+        if new_total_days < current_total_days:
+            # ── 기간 축소: 마지막 일차부터 삭제 ──
+            days_to_remove = list(range(new_total_days + 1, current_total_days + 1))
+            await db.execute(
+                sa_delete(ItineraryModel).where(
+                    ItineraryModel.trip_id == trip.id,
+                    ItineraryModel.day_number.in_(days_to_remove)
+                )
+            )
+            await db.flush()
+
+            # trip 날짜 업데이트
+            await db.execute(
+                sa_update(TripModel)
+                .where(TripModel.id == trip.id)
+                .values(end_date=new_end_date)
+            )
+            await db.commit()
+
+            return {
+                "action": "change_duration",
+                "old_days": current_total_days,
+                "new_days": new_total_days,
+                "removed_days": days_to_remove,
+            }
+
+        else:
+            # ── 기간 연장: 새 일차 일정 생성 ──
+            existing_place_ids = [it.place_id for it in trip.itineraries]
+            conditions = trip.conditions or {}
+            preference = await get_user_preference(db, user_id)
+            planner = get_planner_service()
+            added_days = []
+
+            for day_num in range(current_total_days + 1, new_total_days + 1):
+                target_date = trip.start_date + timedelta(days=day_num - 1)
+                request = GenerateRequest(
+                    title=trip.title,
+                    region=trip.region,
+                    start_date=target_date,
+                    end_date=target_date,
+                    themes=conditions.get("themes", []),
+                    max_places_per_day=conditions.get("max_places_per_day", 10),
+                    exclude_places=existing_place_ids,
+                )
+
+                candidates = await planner._gather_candidates(db, request, preference, 1)
+                if not candidates:
+                    continue
+
+                draft = await planner._generate_with_gpt(candidates, request, preference, 1)
+                place_dict = {c['place_id']: c for c in candidates}
+                places_by_day = planner._build_places_by_day(draft, place_dict)
+                segmented, _ = planner.time_service.structural_split_all(places_by_day)
+                segmented = await planner.route_optimizer.optimize_segments(segmented)
+                constrained, _ = await planner.time_service.apply_time_calculations(
+                    segmented, preference, target_date
+                )
+
+                itinerary_items = []
+                for _, places in constrained.items():
+                    for place in places:
+                        itinerary_items.append({
+                            "place_id": place["place_id"],
+                            "day_number": day_num,
+                            "order_index": place.get("order_index", 1),
+                            "arrival_time": place.get("suggested_arrival_time"),
+                            "stay_duration": place.get("suggested_stay_duration"),
+                            "travel_time_from_prev": place.get("travel_time_from_prev"),
+                            "transport_mode": place.get("transport_mode"),
+                            "memo": place.get("selection_reason"),
+                        })
+                        existing_place_ids.append(place["place_id"])
+
+                await trip_crud.bulk_create_itineraries(db, trip.id, itinerary_items)
+                added_days.append(day_num)
+
+            # trip 날짜 업데이트
+            await db.execute(
+                sa_update(TripModel)
+                .where(TripModel.id == trip.id)
+                .values(end_date=new_end_date)
+            )
+            await db.commit()
+
+            return {
+                "action": "change_duration",
+                "old_days": current_total_days,
+                "new_days": new_total_days,
+                "added_days": added_days,
+            }
 
     async def _apply_optimize_route(
         self,
