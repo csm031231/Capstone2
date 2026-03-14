@@ -199,6 +199,30 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             {"role": "system", "content": f"## 추가 가능한 장소\n{places_context}"}
         ]
 
+        # 축제 요청 시 여행 기간 정보 컨텍스트 추가 (GPT가 날짜 범위를 인식하도록)
+        if hints.get("has_festival"):
+            festival_places = [p for p in available_places if p.category == "축제/행사"]
+            if festival_places:
+                festival_lines = []
+                for p in festival_places:
+                    date_info = ""
+                    if hasattr(p, "event_start_date") and p.event_start_date:
+                        date_info = f" ({p.event_start_date}~{p.event_end_date})"
+                    festival_lines.append(f"- {p.name} [ID: {p.id}]{date_info}")
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"## 여행 기간({trip.start_date}~{trip.end_date}) 내 축제 목록\n"
+                        + "\n".join(festival_lines)
+                        + "\n위 축제들을 일정에 추가(add 액션)하세요."
+                    )
+                })
+            else:
+                messages.append({
+                    "role": "system",
+                    "content": f"여행 기간({trip.start_date}~{trip.end_date}) 내 해당 지역에서 진행되는 축제를 찾지 못했습니다."
+                })
+
         # 이전 대화 추가 (최근 CHAT_CONTEXT_LIMIT개)
         if session.messages:
             for msg in session.messages[-CHAT_CONTEXT_LIMIT:]:
@@ -379,7 +403,11 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             if any(kw in message for kw in keywords):
                 found.append(cat)
 
-        return {"categories": found}
+        # 축제 요청 감지 (별도 플래그)
+        festival_keywords = ["축제", "페스티벌", "festival", "행사", "이벤트"]
+        has_festival = any(kw in message for kw in festival_keywords)
+
+        return {"categories": found, "has_festival": has_festival}
 
     async def _get_places_by_hints(
         self,
@@ -395,6 +423,14 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         seen_ids: set = set()
 
         search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+
+        # 축제 요청 시 여행 기간 내 축제를 TourAPI에서 조회 후 Place 테이블에 저장
+        if hints.get("has_festival"):
+            festival_places = await self._fetch_and_save_festivals(db, trip)
+            for p in festival_places:
+                if p.id not in seen_ids:
+                    collected.append(p)
+                    seen_ids.add(p.id)
 
         # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
@@ -433,6 +469,48 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     break
 
         return collected
+
+    async def _fetch_and_save_festivals(
+        self,
+        db: AsyncSession,
+        trip: Trip
+    ) -> List[Place]:
+        """여행 기간 내 축제를 TourAPI에서 조회 후 Place 테이블에 저장, Place 객체 목록 반환"""
+        try:
+            from Festival.service import get_festival_service
+            from Festival.dto import FestivalSearchRequest
+
+            festival_service = get_festival_service()
+            region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+
+            search_req = FestivalSearchRequest(
+                region=trip.region,
+                start_date=trip.start_date,
+                end_date=trip.end_date,
+                max_items=20
+            )
+            result = await festival_service.search_festivals(db, search_req, fetch_detail=False)
+            if not result.get("success"):
+                return []
+
+            festivals = result.get("festivals", [])
+            places: List[Place] = []
+
+            for festival in festivals:
+                try:
+                    place_id = await festival_service.save_festival_as_place(db, festival.id)
+                    place_result = await db.execute(select(Place).where(Place.id == place_id))
+                    place = place_result.scalar_one_or_none()
+                    if place:
+                        places.append(place)
+                except Exception as e:
+                    logger.warning(f"축제 Place 저장 실패 (id={festival.id}): {e}")
+
+            return places
+
+        except Exception as e:
+            logger.error(f"축제 조회 실패: {e}")
+            return []
 
     def _format_available_places(self, places: List[Place]) -> str:
         """추가 가능한 장소 포맷팅 (최대 30개 GPT 전달 → 토큰 절약)"""
