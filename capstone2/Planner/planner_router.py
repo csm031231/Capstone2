@@ -20,6 +20,7 @@ from Planner.dto import (
 from Planner.planner_service import get_planner_service
 from Planner.chat_service import get_chat_service
 from Planner.route_optimizer import get_route_optimizer
+from Planner.constants import REGION_ALIASES
 from Trip import crud as trip_crud
 
 
@@ -100,24 +101,6 @@ SCENE_TO_THEME = {
     "rural": "전통", "village": "전통",
     "theme_park": "테마파크", "amusement": "테마파크",
 }
-
-# 지역명 정규화 (영문/한문 → 대표 한국어)
-REGION_ALIASES = {
-    "서울": ["seoul", "서울", "서울특별시"],
-    "부산": ["busan", "부산", "부산광역시"],
-    "제주": ["jeju", "제주도", "제주특별자치도"],
-    "강원": ["gangwon", "강원", "강원도"],
-    "경기": ["gyeonggi", "경기", "경기도"],
-    "인천": ["incheon", "인천", "인천광역시"],
-    "대구": ["daegu", "대구", "대구광역시"],
-    "광주": ["gwangju", "광주", "광주광역시"],
-    "대전": ["daejeon", "대전", "대전광역시"],
-    "경북": ["gyeongbuk", "경북", "경상북도"],
-    "경남": ["gyeongnam", "경남", "경상남도"],
-    "전북": ["jeonbuk", "전북", "전라북도"],
-    "전남": ["jeonnam", "전남", "전라남도"],
-}
-
 
 def _normalize_region(name: str) -> Optional[str]:
     """도시/지역명을 대표 한국어 지역명으로 정규화"""
