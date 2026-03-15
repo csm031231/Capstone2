@@ -289,6 +289,23 @@ async def toggle_like(
 
     return is_liked, like_count
 
+async def get_liked_post_ids(
+    db: AsyncSession,
+    user_id: int,
+    post_ids: list[int],
+) -> set[int]:
+    """주어진 post_ids 중 user가 좋아요한 것들의 id set 반환 (N+1 방지)"""
+    if not post_ids:
+        return set()
+    result = await db.execute(
+        select(PostLike.post_id).where(
+            PostLike.user_id == user_id,
+            PostLike.post_id.in_(post_ids),
+        )
+    )
+    return set(result.scalars().all())
+
+
 async def get_liked_posts_by_user(
     db: AsyncSession,
     user_id: int,

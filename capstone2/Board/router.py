@@ -67,7 +67,7 @@ async def get_optional_user(
 # 헬퍼
 # ────────────────────────────────────────────────────────
 
-def _build_summary(post) -> PostSummary:
+def _build_summary(post, is_liked: bool = False) -> PostSummary:
     return PostSummary(
         id=post.id,
         author=AuthorInfo(id=post.user.id, nickname=post.user.nickname),
@@ -82,6 +82,7 @@ def _build_summary(post) -> PostSummary:
         view_count=post.view_count,
         like_count=post.like_count,
         comment_count=post.comment_count,
+        is_liked=is_liked,
         created_at=post.created_at,
     )
 
@@ -172,8 +173,9 @@ async def list_my_posts(
     items, total = await crud.get_posts_by_user(db, user_id=current_user.id, skip=skip, limit=size)
     total_pages = (total + size - 1) // size
 
+    liked_ids = await crud.get_liked_post_ids(db, current_user.id, [p.id for p in items])
     return PostListResponse(
-        items=[_build_summary(p) for p in items],
+        items=[_build_summary(p, is_liked=p.id in liked_ids) for p in items],
         total=total,
         page=page,
         size=size,
@@ -195,7 +197,7 @@ async def list_liked_posts(
     total_pages = (total + size - 1) // size
 
     return PostListResponse(
-        items=[_build_summary(p) for p in items],
+        items=[_build_summary(p, is_liked=True) for p in items],
         total=total,
         page=page,
         size=size,
@@ -208,15 +210,20 @@ async def list_posts(
     size: int = Query(20, ge=1, le=100),
     region: Optional[str] = Query(None),
     tag: Optional[str] = Query(None),
+    current_user: Optional[User] = Depends(get_optional_user),
     db: AsyncSession = Depends(provide_session),
 ):
-    """게시글 목록 조회 (로그인 불필요)"""
+    """게시글 목록 조회 (로그인 불필요, 로그인 시 is_liked 포함)"""
     skip = (page - 1) * size
     items, total = await crud.get_posts(db, skip=skip, limit=size, region=region, tag=tag)
     total_pages = (total + size - 1) // size
 
+    liked_ids: set[int] = set()
+    if current_user:
+        liked_ids = await crud.get_liked_post_ids(db, current_user.id, [p.id for p in items])
+
     return PostListResponse(
-        items=[_build_summary(p) for p in items],
+        items=[_build_summary(p, is_liked=p.id in liked_ids) for p in items],
         total=total,
         page=page,
         size=size,

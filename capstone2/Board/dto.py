@@ -85,6 +85,7 @@ class PostSummary(BaseModel):
     view_count: int
     like_count: int
     comment_count: int
+    is_liked: bool = False
     created_at: datetime
 
     class Config:
