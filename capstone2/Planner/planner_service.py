@@ -222,7 +222,7 @@ class PlannerService:
             if shortage > 0:
                 extra_q = (
                     sa_select2(Place)
-                    .where(Place.address.contains(search_region))
+                    .where(Place.address.like(f"{search_region}%"))
                     .where(Place.category == cat)
                     .where(~Place.id.in_(exclude_ids))
                     .order_by(nulls_last(Place.readcount.desc()))

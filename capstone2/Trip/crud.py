@@ -271,7 +271,7 @@ async def get_region_thumbnail(db: AsyncSession, region: str) -> Optional[str]:
 
     query = (
         select(Place.image_url)
-        .where(Place.address.contains(region), Place.image_url.isnot(None))
+        .where(Place.address.like(f"{region}%"), Place.image_url.isnot(None))
         .order_by(Place.readcount.desc())
         .limit(1)
     )

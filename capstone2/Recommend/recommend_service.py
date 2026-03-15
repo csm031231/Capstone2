@@ -115,10 +115,11 @@ class ConditionRecommender:
         """DB 필터링"""
         query = select(Place)
 
-        # 지역 필터 (전라도→전라, 경상도→경상, 충청도→충청으로 확장 매칭)
+        # 지역 필터: 주소 앞부분으로 매칭 (contains 사용 시 다른 도시의 도로명에 걸리는 문제 방지)
+        # 예) "부산광역시 해운대구 대구로 15" 가 '대구' contains에 걸리는 버그 수정
         if condition.region:
             search_region = REGION_PREFIX.get(condition.region, condition.region)
-            query = query.where(Place.address.contains(search_region))
+            query = query.where(Place.address.like(f"{search_region}%"))
 
         # 카테고리 필터
         if condition.categories:
