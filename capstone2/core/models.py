@@ -105,6 +105,7 @@ class Trip(Base):
     region = Column(String, nullable=True)                    # "부산", "제주" 등 지역
     generation_method = Column(String, default="manual")      # "ai" 또는 "manual"
     preference_snapshot = Column(JSON, nullable=True)         # 생성 시점 선호도 스냅샷
+    thumbnail_url = Column(String, nullable=True)             # 지역 대표 이미지 URL
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

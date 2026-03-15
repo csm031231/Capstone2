@@ -72,6 +72,7 @@ def build_trip_detail_response(trip) -> TripDetailResponse:
         start_date=trip.start_date,
         end_date=trip.end_date,
         region=trip.region,
+        thumbnail_url=trip.thumbnail_url,
         conditions=trip.conditions,
         generation_method=trip.generation_method or "manual",
         total_days=total_days,
@@ -120,6 +121,7 @@ async def get_my_trips(
             start_date=trip.start_date,
             end_date=trip.end_date,
             region=trip.region,
+            thumbnail_url=trip.thumbnail_url,
             conditions=trip.conditions,
             generation_method=trip.generation_method or "manual",
             created_at=trip.created_at.isoformat() if trip.created_at else None,
@@ -334,3 +336,36 @@ async def reorder_itineraries(
     # 업데이트된 여행 정보 반환
     updated_trip = await crud.get_trip_by_id(db, trip_id, current_user.id)
     return build_trip_detail_response(updated_trip)
+
+
+# ==================== 관리용 ====================
+
+@router.post("/admin/fill-thumbnails")
+async def fill_missing_thumbnails(
+    db: AsyncSession = Depends(provide_session),
+):
+    """thumbnail_url이 없는 기존 여행에 지역 대표 이미지 일괄 설정 (한 번만 실행)"""
+    from sqlalchemy import select
+    from core.models import Trip
+
+    result = await db.execute(
+        select(Trip).where(Trip.thumbnail_url.is_(None), Trip.region.isnot(None))
+    )
+    trips = result.scalars().all()
+
+    updated = 0
+    skipped = 0
+    for trip in trips:
+        thumbnail = await crud.get_region_thumbnail(db, trip.region)
+        if thumbnail:
+            trip.thumbnail_url = thumbnail
+            updated += 1
+        else:
+            skipped += 1
+
+    await db.commit()
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "message": f"{updated}개 여행 썸네일 설정 완료, {skipped}개는 해당 지역 이미지 없음"
+    }
