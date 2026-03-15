@@ -55,9 +55,9 @@ class HybridRecommender:
     FALLBACK_HIGH = 0.55
     FALLBACK_LOW = 0.30
 
-    # 가중치 (CLIP 중심)
-    CLIP_WEIGHT = 0.7
-    TAG_WEIGHT = 0.3
+    # 가중치 (태그 중심으로 변경 — travel_tags가 한국 DB 어휘와 직접 매칭됨)
+    CLIP_WEIGHT = 0.35
+    TAG_WEIGHT = 0.65
 
     def __init__(self):
         self.clip_service = None
@@ -171,23 +171,17 @@ class HybridRecommender:
         distribution = self._analyze_score_distribution(scores)
 
         # 7. 전략 결정
-        if top_score >= high_threshold or distribution == "dominant":
-            # CLIP만으로 충분히 높거나 1위가 압도적
-            return self._build_results(clip_results[:top_k], method="clip")
-
-        elif top_score < low_threshold and distribution == "weak":
-            # CLIP 낮고 전반적으로 약함 → 태그 Fallback
-            if tags:
+        # tags(travel_tags)가 있으면 항상 hybrid — CLIP 단독은 한국 DB 태그와 불일치 위험
+        if tags:
+            if top_score < low_threshold and distribution == "weak":
+                # CLIP 유사도가 낮을 때 → 태그 우선 hybrid
                 return self._hybrid_with_tag_priority(clip_results, tags, top_k)
             else:
-                return self._build_results(clip_results[:top_k], method="clip")
-
-        else:
-            # 중간 또는 경쟁 상태 → Hybrid 합산
-            if tags:
+                # CLIP 유사도가 충분할 때도 travel_tags와 blend
                 return self._hybrid_blend(clip_results, tags, top_k)
-            else:
-                return self._build_results(clip_results[:top_k], method="clip")
+        else:
+            # 태그 없으면 CLIP만으로 처리
+            return self._build_results(clip_results[:top_k], method="clip")
 
     def _hybrid_blend(
         self,

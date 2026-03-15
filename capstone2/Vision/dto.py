@@ -25,6 +25,8 @@ class VisionAnalysisResult(BaseModel):
     country: Optional[str] = None
     city: Optional[str] = None
     scene_type: List[str] = []
+    travel_tags: List[str] = []   # 한국 여행 DB 태그 어휘와 맞춘 태그
+    atmosphere: Optional[str] = None  # 한 문장 분위기 설명
     confidence: float = 0.0
     reason: Optional[str] = None
 

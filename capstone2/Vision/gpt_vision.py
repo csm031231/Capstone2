@@ -14,17 +14,7 @@ config = get_config()
 client = OpenAI(api_key=config.openai_api_key)
 
 
-VISION_PROMPT = """이 사진을 분석해서 다음 정보를 JSON 형식으로 반환해줘:
-
-1. candidates: 가능한 위치 후보 상위 2개 (신뢰도 높은 순)
-   - 각 후보: landmark, country, city, confidence
-2. scene_type: 장면 유형 배열 (예: ["city", "night", "nature", "beach", "mountain", "urban", "rural"])
-3. reason: 판단 근거 (한국어로)
-
-중요:
-- 반드시 2개의 후보를 제시해야 함 (2번째가 애매하면 confidence를 낮게)
-- 랜드마크가 없으면 landmark는 null
-- confidence는 0~1 사이 값
+VISION_PROMPT = """이 사진을 국내 여행 일정 추천 앱을 위해 분석해줘.
 
 반드시 아래 JSON 형식으로만 응답해:
 {
@@ -32,9 +22,30 @@ VISION_PROMPT = """이 사진을 분석해서 다음 정보를 JSON 형식으로
         {"landmark": "장소명 또는 null", "country": "국가명", "city": "도시명", "confidence": 0.0},
         {"landmark": null, "country": "국가명", "city": "도시명", "confidence": 0.0}
     ],
-    "scene_type": ["유형1", "유형2"],
-    "reason": "판단 근거"
-}"""
+    "travel_tags": ["태그1", "태그2"],
+    "scene_type": ["영문유형1", "영문유형2"],
+    "atmosphere": "이 사진의 분위기를 한 문장으로 (예: 조용한 해변에서 일몰을 감상하는 힐링 여행)",
+    "reason": "판단 근거 (한국어)"
+}
+
+travel_tags 작성 규칙:
+- 아래 목록에서만 선택, 최대 5개
+- 이 사진의 분위기·장소 특성과 가장 잘 맞는 것만 고를 것
+자연, 바다, 해변, 산, 숲, 공원, 호수, 강, 노을, 일출,
+힐링, 휴양, 조용한, 평화로운,
+액티비티, 레저, 체험, 어드벤처,
+역사, 문화재, 유적, 전통, 고궁, 박물관, 사찰,
+도시, 야경, 시내, 번화가, 쇼핑,
+맛집, 음식, 미식, 로컬푸드,
+카페, 디저트, 커피, 브런치,
+사진명소, 포토스팟, 전망, 경치, 뷰맛집,
+여름, 겨울, 봄, 가을, 눈, 단풍, 벚꽃,
+실내, 실외, 가족, 커플
+
+중요:
+- 반드시 2개의 후보를 제시 (2번째가 애매하면 confidence를 낮게)
+- 랜드마크가 없으면 landmark는 null
+- confidence는 0~1 사이 값"""
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -122,6 +133,8 @@ async def analyze_image_with_gpt(image_path: str) -> VisionAnalysisResult:
             country=top1.country if top1 else None,
             city=top1.city if top1 else None,
             scene_type=result_json.get("scene_type", []),
+            travel_tags=result_json.get("travel_tags", []),
+            atmosphere=result_json.get("atmosphere"),
             confidence=top1.confidence if top1 else 0.0,
             reason=result_json.get("reason"),
             top1=top1,

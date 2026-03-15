@@ -190,19 +190,27 @@ async def recommend_places(
     current_user: User = Depends(get_current_user)
 ):
     """
-    이미지 기반 유사 여행지 추천 (CLIP + 태그 Hybrid)
+    이미지 기반 유사 여행지 추천 (GPT Vision 태그 + CLIP Hybrid)
 
-    - CLIP 모델로 이미지 유사도 검색
-    - 유사도 낮으면 태그 매칭으로 Fallback
+    - GPT Vision으로 travel_tags 추출 (한국 DB 태그 어휘 기반)
+    - travel_tags + CLIP 이미지 유사도 Hybrid 검색
     - 최적의 추천 결과 반환
     """
     contents, img, ext = await _validate_and_read_image(image)
     img_rgb = img.convert("RGB")
+    file_path = _save_image(contents, ext)
+
+    # GPT Vision으로 travel_tags 추출 (태그 매칭 품질 향상)
+    try:
+        analysis_result = await analyze_image_with_gpt(file_path)
+        tags = analysis_result.travel_tags if analysis_result.travel_tags else analysis_result.scene_type or None
+    except Exception:
+        tags = None
 
     # Hybrid 추천 실행
     try:
         recommender = get_recommender()
-        results = recommender.recommend(image=img_rgb, top_k=top_k)
+        results = recommender.recommend(image=img_rgb, tags=tags, top_k=top_k)
 
         # DTO 변환
         recommendations = [
@@ -300,8 +308,8 @@ async def full_analyze(
         try:
             recommender = get_recommender()
 
-            # GPT가 추출한 scene_type을 태그로 활용 (빈 리스트도 전달)
-            tags = analysis_result.scene_type if analysis_result.scene_type else None
+            # travel_tags 우선, 없으면 scene_type fallback
+            tags = analysis_result.travel_tags if analysis_result.travel_tags else analysis_result.scene_type or None
 
             results = recommender.recommend(
                 image=img_rgb,
