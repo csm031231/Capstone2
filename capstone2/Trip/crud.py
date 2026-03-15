@@ -265,7 +265,10 @@ async def validate_place_exists(db: AsyncSession, place_id: int) -> bool:
 
 
 async def get_region_thumbnail(db: AsyncSession, region: str) -> Optional[str]:
-    """지역명으로 대표 이미지 URL 조회 (readcount 높은 장소 우선)"""
+    """지역 대표 이미지를 우리 서버에 다운로드 후 로컬 URL 반환"""
+    import uuid, os, httpx
+    from core.config import get_config
+
     query = (
         select(Place.image_url)
         .where(Place.address.contains(region), Place.image_url.isnot(None))
@@ -273,4 +276,34 @@ async def get_region_thumbnail(db: AsyncSession, region: str) -> Optional[str]:
         .limit(1)
     )
     result = await db.execute(query)
-    return result.scalar_one_or_none()
+    external_url = result.scalar_one_or_none()
+
+    if not external_url:
+        return None
+
+    # 이미 우리 서버 URL이면 그대로 반환
+    base_url = get_config().base_url.rstrip("/")
+    if external_url.startswith(base_url):
+        return external_url
+
+    # 외부 이미지 다운로드 후 저장
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(external_url)
+            if resp.status_code != 200:
+                return None
+            contents = resp.content
+
+        ext = external_url.rsplit(".", 1)[-1].lower().split("?")[0]
+        if ext not in {"jpg", "jpeg", "png", "webp"}:
+            ext = "jpg"
+
+        upload_dir = "uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"{uuid.uuid4()}.{ext}"
+        with open(f"{upload_dir}/{filename}", "wb") as f:
+            f.write(contents)
+
+        return f"{base_url}/uploads/{filename}"
+    except Exception:
+        return None
