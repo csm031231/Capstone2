@@ -12,6 +12,7 @@ greenlet==3.3.0
 # Pydantic / Settings
 pydantic==2.12.5
 pydantic-settings==2.12.0
+email-validator==2.2.0
 
 # Auth
 python-jose==3.5.0
