@@ -361,7 +361,7 @@ async def generate_with_photo_upload(
     # 이미지 검증 및 저장
     contents, img, ext = await _validate_and_read_image(image)
     exif_info = extract_exif_info(img)
-    file_path = _save_image(contents, ext)
+    file_path, _ = _save_image(contents, ext)
 
     # GPT Vision 분석
     try:

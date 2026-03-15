@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     
     jwt_token_expire_minutes: int = 60 * 24  
 
+    base_url: str = "http://localhost:8000"
+
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
     kakao_map_api_key: str = ""
