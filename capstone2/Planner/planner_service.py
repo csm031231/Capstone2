@@ -104,7 +104,7 @@ class PlannerService:
         # 8단계: DB 저장
         print("[PLANNER] 8단계: DB 저장 시작")
         trip = await self._save_trip(
-            db, user_id, request, constrained, user_preference
+            db, user_id, request, constrained, user_preference, photo_url=photo_url
         )
         print(f"[PLANNER] 8단계 완료: trip_id={trip.id}")
 
@@ -522,7 +522,8 @@ class PlannerService:
         user_id: int,
         request: GenerateRequest,
         places_by_day: Dict[int, List[dict]],
-        preference: Optional[UserPreference]
+        preference: Optional[UserPreference],
+        photo_url: Optional[str] = None
     ):
         """Trip 및 Itinerary DB 저장 (단일 트랜잭션)"""
         try:
