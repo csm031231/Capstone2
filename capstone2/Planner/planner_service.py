@@ -544,6 +544,12 @@ class PlannerService:
                 preference_snapshot=preference_to_snapshot(preference)
             )
 
+            # 지역 대표 이미지 자동 설정
+            thumbnail = await trip_crud.get_region_thumbnail(db, request.region)
+            if thumbnail:
+                trip.thumbnail_url = thumbnail
+                await db.commit()
+
             # Itinerary 일괄 생성
             itinerary_items = []
             for day_num, places in places_by_day.items():

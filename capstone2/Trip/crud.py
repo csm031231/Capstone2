@@ -262,3 +262,15 @@ async def validate_place_exists(db: AsyncSession, place_id: int) -> bool:
     """장소 존재 여부 확인"""
     place = await get_place_by_id(db, place_id)
     return place is not None
+
+
+async def get_region_thumbnail(db: AsyncSession, region: str) -> Optional[str]:
+    """지역명으로 대표 이미지 URL 조회 (readcount 높은 장소 우선)"""
+    query = (
+        select(Place.image_url)
+        .where(Place.address.contains(region), Place.image_url.isnot(None))
+        .order_by(Place.readcount.desc())
+        .limit(1)
+    )
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
