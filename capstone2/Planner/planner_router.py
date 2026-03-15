@@ -361,7 +361,7 @@ async def generate_with_photo_upload(
     # 이미지 검증 및 저장
     contents, img, ext = await _validate_and_read_image(image)
     exif_info = extract_exif_info(img)
-    file_path, _ = _save_image(contents, ext)
+    file_path, photo_url = _save_image(contents, ext)
 
     # GPT Vision 분석
     try:
@@ -438,7 +438,7 @@ async def generate_with_photo_upload(
 
     try:
         trip_data = await planner.generate_itinerary(
-            db, current_user.id, generate_request, preference
+            db, current_user.id, generate_request, preference, photo_url=photo_url
         )
         return GenerateWithPhotoResponse(
             needs_clarification=False,

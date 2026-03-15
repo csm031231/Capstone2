@@ -43,7 +43,8 @@ class PlannerService:
         db: AsyncSession,
         user_id: int,
         request: GenerateRequest,
-        user_preference: Optional[UserPreference] = None
+        user_preference: Optional[UserPreference] = None,
+        photo_url: Optional[str] = None
     ) -> GenerateResponse:
         """
         AI 일정 생성 파이프라인
@@ -544,8 +545,8 @@ class PlannerService:
                 preference_snapshot=preference_to_snapshot(preference)
             )
 
-            # 지역 대표 이미지 자동 설정
-            thumbnail = await trip_crud.get_region_thumbnail(db, request.region)
+            # 썸네일 설정: 업로드된 사진 우선, 없으면 지역 대표 이미지
+            thumbnail = photo_url or await trip_crud.get_region_thumbnail(db, request.region)
             if thumbnail:
                 trip.thumbnail_url = thumbnail
                 await db.commit()
