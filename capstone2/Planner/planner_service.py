@@ -205,6 +205,8 @@ class PlannerService:
         # (테마 점수가 낮아서 추천에서 빠진 식당을 강제로 포함)
         from sqlalchemy import select as sa_select2, nulls_last
         existing_ids = {c['place_id'] for c in candidates}
+        # exclude_places(다른 날 장소 포함)도 함께 제외
+        exclude_ids = existing_ids | set(request.exclude_places or [])
         # 일수당 최소 맛집(점심+저녁) 2개 보장 (카페는 선택적으로 포함)
         min_counts = {"맛집": total_days * 2}
         cat_counts = {}
@@ -221,7 +223,7 @@ class PlannerService:
                     sa_select2(Place)
                     .where(Place.address.contains(search_region))
                     .where(Place.category == cat)
-                    .where(~Place.id.in_(existing_ids))
+                    .where(~Place.id.in_(exclude_ids))
                     .order_by(nulls_last(Place.readcount.desc()))
                     .limit(shortage + 2)
                 )
@@ -475,6 +477,26 @@ class PlannerService:
                     logger.warning(f"{day_num}일차: place_id={place_id} 후보 목록에 없음 - 스킵")
                     continue
                 if place_id in used_place_ids:
+                    # 맛집 중복 스킵 시 미사용 맛집으로 대체
+                    if place_dict.get(place_id, {}).get('category') == '맛집':
+                        alt = next(
+                            (p for pid, p in place_dict.items()
+                             if pid not in used_place_ids and p.get('category') == '맛집'),
+                            None
+                        )
+                        if alt:
+                            place = alt.copy()
+                            gpt_order = place_data.get("order")
+                            place['order_index'] = gpt_order if isinstance(gpt_order, int) and gpt_order > 0 else len(places) + 1
+                            place['suggested_stay_duration'] = place_data.get("stay_duration", 60)
+                            place['is_night_place'] = place_data.get("is_night", False)
+                            place['selection_reason'] = place_data.get("reason", "AI 추천")
+                            place['day_number'] = day_num
+                            place['place_category'] = alt.get('category')
+                            place['place_name'] = alt.get('name')
+                            place['place_address'] = alt.get('address')
+                            places.append(place)
+                            used_place_ids.add(alt['place_id'])
                     continue
                 place = place_dict[place_id].copy()
                 gpt_order = place_data.get("order")

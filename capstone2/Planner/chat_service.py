@@ -266,12 +266,15 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         response_message = result.get("response_message", "요청을 처리했습니다.")
 
         if not result.get("needs_confirmation") and result.get("action_type") != "question":
-            changes_made, updated_trip = await self._apply_changes(
+            changes_made, updated_trip, warnings = await self._apply_changes(
                 db, user_id, trip, result.get("changes", []), available_places
             )
             # 변경 요청은 했는데 실제로 적용된 게 없으면 사용자에게 알림
             if result.get("changes") and not changes_made:
                 response_message = "요청하신 장소를 현재 목록에서 찾을 수 없어 변경하지 못했어요. 다른 장소명으로 다시 시도해 주세요."
+            # 교체 실패(중복) 경고 메시지 추가
+            if warnings:
+                response_message = " ".join(warnings)
 
         # 8. 세션 업데이트
         await self._update_session(
@@ -720,6 +723,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
     ) -> tuple:
         """변경 사항 적용"""
         applied_changes = []
+        warning_messages = []
         place_id_dict = {p.id: p for p in available_places}
 
         for change in changes:
@@ -739,7 +743,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 elif action == "replace":
                     result = await self._apply_replace(db, trip, change, available_places, place_id_dict)
                     if result:
-                        applied_changes.append(result)
+                        if result.get("_blocked"):
+                            warning_messages.append(result["_blocked"])
+                        else:
+                            applied_changes.append(result)
 
                 elif action == "reorder":
                     result = await self._apply_reorder(db, trip, change)
@@ -801,7 +808,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 ]
             }
 
-        return applied_changes, trip_dict
+        return applied_changes, trip_dict, warning_messages
 
     async def _apply_add(
         self, db, trip, change, available_places, place_id_dict
@@ -951,6 +958,10 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     break
 
         if old_it and new_place:
+            # 새 장소가 이미 다른 날 일정에 있으면 교체 불가 (교체될 old 장소는 제외하고 체크)
+            already_used = {it.place_id for it in trip.itineraries if it.id != old_it.id}
+            if new_place.id in already_used:
+                return {"_blocked": f"'{new_place.name}'은(는) 이미 다른 날 일정에 포함되어 있어 교체할 수 없습니다. 원하시는 식당 이름을 직접 말씀해 주세요"}
             from Trip.dto import ItineraryUpdate
             await trip_crud.update_itinerary(
                 db, old_it.id,
@@ -1177,6 +1188,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 end_date=trip.end_date,
                 themes=merged_themes,
                 max_places_per_day=conditions.get("max_places_per_day", 10),
+                must_visit_places=conditions.get("must_visit_places", []),
             )
 
             candidates = await planner._gather_candidates(db, request, preference, total_days)
