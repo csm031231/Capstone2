@@ -7,6 +7,7 @@ import io
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import get_config
 from core.database import provide_session
 from core.models import User, AnalysisLog
 from User.user_router import get_current_user
@@ -85,8 +86,8 @@ async def _validate_and_read_image(image: UploadFile):
     return contents, img, ext
 
 
-def _save_image(contents: bytes, ext: str) -> str:
-    """이미지를 디스크에 저장하고 경로 반환"""
+def _save_image(contents: bytes, ext: str) -> tuple[str, str]:
+    """이미지를 디스크에 저장하고 (로컬경로, URL) 튜플 반환"""
     filename = f"{uuid.uuid4()}.{ext}"
     ensure_upload_dir()
     file_path = os.path.join(UPLOAD_DIR, filename)
@@ -94,7 +95,8 @@ def _save_image(contents: bytes, ext: str) -> str:
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    return file_path
+    base_url = get_config().base_url.rstrip("/")
+    return file_path, f"{base_url}/uploads/{filename}"
 
 
 async def _save_analysis_log(
@@ -132,11 +134,11 @@ async def upload_image(image: UploadFile = File(...)):
     """
     contents, img, ext = await _validate_and_read_image(image)
     exif_info = extract_exif_info(img)
-    file_path = _save_image(contents, ext)
+    file_path, image_url = _save_image(contents, ext)
 
     return UploadResponse(
         success=True,
-        image_path=file_path,
+        image_path=image_url,
         exif=exif_info,
         message="이미지가 성공적으로 업로드되었습니다."
     )
@@ -159,7 +161,7 @@ async def analyze_image(
     """
     contents, img, ext = await _validate_and_read_image(image)
     exif_info = extract_exif_info(img)
-    file_path = _save_image(contents, ext)
+    file_path, image_url = _save_image(contents, ext)
 
     # GPT Vision 분석
     analysis_result = await analyze_image_with_gpt(file_path)
@@ -169,7 +171,7 @@ async def analyze_image(
 
     # AnalysisLog 저장
     await _save_analysis_log(
-        db, current_user.id, file_path, result_type, analysis_result, exif_info
+        db, current_user.id, image_url, result_type, analysis_result, exif_info
     )
 
     # 최종 응답 생성
@@ -177,7 +179,7 @@ async def analyze_image(
         analysis=analysis_result,
         result_type=result_type,
         exif=exif_info,
-        image_path=file_path
+        image_path=image_url
     )
 
     return response
@@ -198,7 +200,7 @@ async def recommend_places(
     """
     contents, img, ext = await _validate_and_read_image(image)
     img_rgb = img.convert("RGB")
-    file_path = _save_image(contents, ext)
+    file_path, _ = _save_image(contents, ext)
 
     # GPT Vision으로 travel_tags 추출 (태그 매칭 품질 향상)
     try:
@@ -279,7 +281,7 @@ async def full_analyze(
     contents, img, ext = await _validate_and_read_image(image)
     img_rgb = img.convert("RGB")
     exif_info = extract_exif_info(img)
-    file_path = _save_image(contents, ext)
+    file_path, image_url = _save_image(contents, ext)
 
     # 1. GPT Vision 분석
     analysis_result = await analyze_image_with_gpt(file_path)
@@ -289,7 +291,7 @@ async def full_analyze(
 
     # 3. AnalysisLog 저장
     await _save_analysis_log(
-        db, current_user.id, file_path, result_type, analysis_result, exif_info
+        db, current_user.id, image_url, result_type, analysis_result, exif_info
     )
 
     # 4. 기본 응답 생성
@@ -297,7 +299,7 @@ async def full_analyze(
         analysis=analysis_result,
         result_type=result_type,
         exif=exif_info,
-        image_path=file_path
+        image_path=image_url
     )
 
     # 5. Type B, C인 경우 유사 여행지 추천

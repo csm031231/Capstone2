@@ -1,8 +1,11 @@
+import os
+import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import get_config
 from core.database import provide_session
 from core.dependencies import verify_jwt
 from core.models import User
@@ -122,6 +125,35 @@ def _build_detail(post, is_liked: bool) -> PostDetail:
         created_at=post.created_at,
         updated_at=post.updated_at,
     )
+
+
+# ────────────────────────────────────────────────────────
+# 이미지 업로드 엔드포인트
+# ────────────────────────────────────────────────────────
+
+UPLOAD_DIR = "uploads"
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+
+
+@router.post("/images/upload")
+async def upload_post_image(
+    image: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """게시글용 이미지 업로드 → URL 반환 (로그인 필요)"""
+    ext = (image.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="지원하지 않는 형식입니다")
+
+    contents = await image.read()
+    filename = f"{uuid.uuid4()}.{ext}"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    with open(f"{UPLOAD_DIR}/{filename}", "wb") as f:
+        f.write(contents)
+
+    base_url = get_config().base_url.rstrip("/")
+    return {"image_url": f"{base_url}/uploads/{filename}"}
 
 
 # ────────────────────────────────────────────────────────

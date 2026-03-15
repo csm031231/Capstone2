@@ -1,7 +1,9 @@
 import logging
+import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from core.config import get_config
@@ -56,6 +58,10 @@ app = FastAPI(
 # 라우터 등록
 for router in routers:
     app.include_router(router=router)
+
+# 업로드 이미지 정적 파일 서빙
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # CORS 설정
 app.add_middleware(
