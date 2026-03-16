@@ -618,6 +618,25 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             if place:
                 return place
 
+        # 5. DB에 없으면 TourAPI로 검색 후 저장, 재시도
+        try:
+            from DataCollector.collector_service import DataCollectorService
+            collector = DataCollectorService()
+            await collector.collect_by_keyword(
+                db, keyword=name, area_name=region, max_items=5, enhance_with_wiki=False
+            )
+            # 저장 후 재검색
+            q = select(Place).where(Place.name.contains(name))
+            if search_region:
+                q = q.where(Place.address.like(f"{search_region}%"))
+            q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place
+        except Exception as e:
+            logger.warning(f"TourAPI 폴백 검색 실패 ({name}): {e}")
+
         return None
 
     def _find_place_by_name(
