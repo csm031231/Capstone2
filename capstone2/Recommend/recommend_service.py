@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from typing import List, Optional, Set
 from datetime import date
 
@@ -115,11 +115,19 @@ class ConditionRecommender:
         """DB 필터링"""
         query = select(Place)
 
-        # 지역 필터: 주소 앞부분으로 매칭 (contains 사용 시 다른 도시의 도로명에 걸리는 문제 방지)
-        # 예) "부산광역시 해운대구 대구로 15" 가 '대구' contains에 걸리는 버그 수정
+        # 지역 필터
+        # - REGION_PREFIX에 있는 광역시/도 → 접두 LIKE (대구로·서울로 등 도로명 오탐 방지)
+        # - 리스트 값(전북 등): OR 접두 LIKE (행정구역 명칭 변경 대응)
+        # - 경주·전주·강릉 등 도 소속 일반 시 → contains LIKE
         if condition.region:
-            search_region = REGION_PREFIX.get(condition.region, condition.region)
-            query = query.where(Place.address.like(f"{search_region}%"))
+            if condition.region in REGION_PREFIX:
+                prefixes = REGION_PREFIX[condition.region]
+                if isinstance(prefixes, list):
+                    query = query.where(or_(*[Place.address.like(f"{p}%") for p in prefixes]))
+                else:
+                    query = query.where(Place.address.like(f"{prefixes}%"))
+            else:
+                query = query.where(Place.address.contains(condition.region))
 
         # 카테고리 필터
         if condition.categories:
