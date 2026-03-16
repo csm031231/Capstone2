@@ -382,7 +382,8 @@ async def generate_with_photo_upload(
     photo_city_norm = _normalize_region(photo_city) if photo_city else None
     if (
         photo_city
-        and (photo_city_norm is not None or analysis.confidence >= 0.6)
+        and photo_city_norm is not None   # 한국 지역으로 정규화 가능한 경우만
+        and analysis.confidence >= 0.75   # 높은 확신일 때만 (0.6→0.75 상향, 오탐 방지)
         and not use_photo_themes
         and not _regions_match(photo_city, region)
     ):
