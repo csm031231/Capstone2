@@ -138,15 +138,15 @@ ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 
 @router.post("/images/upload")
 async def upload_post_image(
-    image: UploadFile = File(...),
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
     """게시글용 이미지 업로드 → URL 반환 (로그인 필요)"""
-    ext = (image.filename or "").rsplit(".", 1)[-1].lower()
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="지원하지 않는 형식입니다")
 
-    contents = await image.read()
+    contents = await file.read()
     filename = f"{uuid.uuid4()}.{ext}"
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
