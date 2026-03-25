@@ -116,7 +116,8 @@ class GenerateWithPhotoRequest(BaseModel):
 
     # 사진 분석 결과 (vision/analyze 응답값)
     photo_city: Optional[str] = Field(None, description="사진에서 감지된 도시")
-    photo_landmark: Optional[str] = Field(None, description="사진에서 감지된 랜드마크")
+    photo_landmark: Optional[str] = Field(None, description="사진에서 감지된 랜드마크 (단수, 하위 호환)")
+    photo_landmarks: List[str] = Field(default=[], description="같은 도시 여러 장 업로드 시 랜드마크 배열")
     photo_scene_types: List[str] = Field(default=[], description="사진 scene_type 배열")
 
     # 지역 불일치 확인 후 프론트에서 다시 보낼 때

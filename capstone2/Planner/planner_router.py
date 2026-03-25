@@ -264,10 +264,19 @@ async def generate_with_photo(
 
     # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
     must_visit = list(request.must_visit_places)
-    if request.photo_landmark and photo_city_norm is not None:
-        landmark_id = await _find_landmark_place_id(db, request.photo_landmark, request.region)
-        if landmark_id and landmark_id not in must_visit:
-            must_visit.insert(0, landmark_id)
+    if photo_city_norm is not None:
+        # photo_landmarks 배열 우선, 없으면 photo_landmark 단수 사용 (하위 호환)
+        all_landmarks = request.photo_landmarks if request.photo_landmarks else (
+            [request.photo_landmark] if request.photo_landmark else []
+        )
+        for i, landmark in enumerate(all_landmarks):
+            if landmark:
+                landmark_id = await _find_landmark_place_id(db, landmark, request.region)
+                if landmark_id and landmark_id not in must_visit:
+                    if i == 0:
+                        must_visit.insert(0, landmark_id)  # 첫 번째(가장 확신 높은) 랜드마크 우선
+                    else:
+                        must_visit.append(landmark_id)
 
     # 기존 GenerateRequest로 변환하여 일정 생성
     generate_request = GenerateRequest(

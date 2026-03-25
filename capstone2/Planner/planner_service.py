@@ -215,14 +215,23 @@ class PlannerService:
             cat = c.get('category', '')
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
-        search_region = REGION_PREFIX.get(request.region, request.region)
+        # 지역 필터 조건 결정 (recommend_service와 동일한 로직)
+        if request.region in REGION_PREFIX:
+            prefixes = REGION_PREFIX[request.region]
+            if isinstance(prefixes, list):
+                from sqlalchemy import or_ as _or
+                addr_filter = _or(*[Place.address.like(f"{p}%") for p in prefixes])
+            else:
+                addr_filter = Place.address.like(f"{prefixes}%")
+        else:
+            addr_filter = Place.address.contains(request.region)
 
         for cat, min_count in min_counts.items():
             shortage = min_count - cat_counts.get(cat, 0)
             if shortage > 0:
                 extra_q = (
                     sa_select2(Place)
-                    .where(Place.address.like(f"{search_region}%"))
+                    .where(addr_filter)
                     .where(Place.category == cat)
                     .where(~Place.id.in_(exclude_ids))
                     .order_by(nulls_last(Place.readcount.desc()))

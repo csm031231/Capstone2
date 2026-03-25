@@ -13,8 +13,7 @@ from core.models import User, AnalysisLog
 from User.user_router import get_current_user
 
 from Vision.dto import (
-    UploadResponse, VisionResponse, RecommendationResponse,
-    RecommendedPlace, FullAnalysisResponse
+    UploadResponse, RecommendedPlace, FullAnalysisResponse
 )
 from Vision.exif_utils import extract_exif_info
 from Vision.gpt_vision import analyze_image_with_gpt, determine_type, build_response
@@ -142,124 +141,6 @@ async def upload_image(image: UploadFile = File(...)):
         exif=exif_info,
         message="이미지가 성공적으로 업로드되었습니다."
     )
-
-
-@router.post("/analyze", response_model=VisionResponse)
-async def analyze_image(
-    image: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(provide_session)
-):
-    """
-    이미지 분석 엔드포인트 (업로드 + GPT Vision 분석 통합)
-    - 이미지 업로드
-    - EXIF 추출
-    - GPT Vision 분석
-    - Type A/B/C 분기
-    - AnalysisLog 저장
-    - 최종 응답 반환
-    """
-    contents, img, ext = await _validate_and_read_image(image)
-    exif_info = extract_exif_info(img)
-    file_path, image_url = _save_image(contents, ext)
-
-    # GPT Vision 분석
-    analysis_result = await analyze_image_with_gpt(file_path)
-
-    # Type 결정 (A/B/C)
-    result_type = determine_type(analysis_result, exif_info)
-
-    # AnalysisLog 저장
-    await _save_analysis_log(
-        db, current_user.id, image_url, result_type, analysis_result, exif_info
-    )
-
-    # 최종 응답 생성
-    response = build_response(
-        analysis=analysis_result,
-        result_type=result_type,
-        exif=exif_info,
-        image_path=image_url
-    )
-
-    return response
-
-
-@router.post("/recommend", response_model=RecommendationResponse)
-async def recommend_places(
-    image: UploadFile = File(...),
-    top_k: int = Query(default=5, ge=1, le=20, description="추천 개수"),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    이미지 기반 유사 여행지 추천 (GPT Vision 태그 + CLIP Hybrid)
-
-    - GPT Vision으로 travel_tags 추출 (한국 DB 태그 어휘 기반)
-    - travel_tags + CLIP 이미지 유사도 Hybrid 검색
-    - 최적의 추천 결과 반환
-    """
-    contents, img, ext = await _validate_and_read_image(image)
-    img_rgb = img.convert("RGB")
-    file_path, _ = _save_image(contents, ext)
-
-    # GPT Vision으로 travel_tags 추출 (태그 매칭 품질 향상)
-    try:
-        analysis_result = await analyze_image_with_gpt(file_path)
-        tags = analysis_result.travel_tags if analysis_result.travel_tags else analysis_result.scene_type or None
-    except Exception:
-        tags = None
-
-    # Hybrid 추천 실행
-    try:
-        recommender = get_recommender()
-        results = recommender.recommend(image=img_rgb, tags=tags, top_k=top_k)
-
-        # DTO 변환
-        recommendations = [
-            RecommendedPlace(
-                place_id=r.place_id,
-                name=r.name,
-                address=r.address,
-                latitude=r.latitude,
-                longitude=r.longitude,
-                image_url=r.image_url,
-                tags=r.tags,
-                category=r.category,
-                clip_score=r.clip_score,
-                tag_score=r.tag_score,
-                final_score=r.final_score,
-                method=r.method,
-                reason=r.reason
-            )
-            for r in results
-        ]
-
-        # 전략 설명
-        if recommendations:
-            methods = set(r.method for r in recommendations)
-            if "hybrid" in methods:
-                strategy = "CLIP 이미지 유사도 + 태그 매칭 복합 사용"
-            elif "tag" in methods:
-                strategy = "태그 매칭 중심 (이미지 유사도 낮음)"
-            else:
-                strategy = "CLIP 이미지 유사도 중심"
-        else:
-            strategy = "추천 결과 없음"
-
-        return RecommendationResponse(
-            success=True,
-            recommendations=recommendations,
-            total_count=len(recommendations),
-            strategy_used=strategy,
-            message=f"{len(recommendations)}개의 유사 여행지를 찾았습니다."
-        )
-
-    except Exception as e:
-        logger.error(f"추천 처리 중 오류: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"추천 처리 중 오류: {str(e)}"
-        )
 
 
 @router.post("/full-analyze", response_model=FullAnalysisResponse)
