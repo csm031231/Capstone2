@@ -13,7 +13,7 @@ from core.models import User, AnalysisLog
 from User.user_router import get_current_user
 
 from Vision.dto import (
-    UploadResponse, RecommendedPlace, FullAnalysisResponse
+    UploadResponse, RecommendedPlace, FullAnalysisResponse, ScoreBreakdown
 )
 from Vision.exif_utils import extract_exif_info
 from Vision.gpt_vision import analyze_image_with_gpt, determine_type, build_response
@@ -234,6 +234,16 @@ async def full_analyze(
             logger.error(f"추천 처리 중 오류: {e}")
             recommendation_strategy = f"추천 처리 실패: {str(e)}"
 
+    score_breakdown = None
+    if recommendations:
+        score_breakdown = ScoreBreakdown(
+            avg_clip_score=round(sum(r.clip_score for r in recommendations) / len(recommendations), 4),
+            avg_tag_score=round(sum(r.tag_score for r in recommendations) / len(recommendations), 4),
+            avg_final_score=round(sum(r.final_score for r in recommendations) / len(recommendations), 4),
+            top_clip_score=round(max(r.clip_score for r in recommendations), 4),
+            scored_count=len(recommendations)
+        )
+
     return FullAnalysisResponse(
         type=base_response.type,
         location=base_response.location,
@@ -243,5 +253,6 @@ async def full_analyze(
         exif=base_response.exif,
         image_path=base_response.image_path,
         recommendations=recommendations,
-        recommendation_strategy=recommendation_strategy
+        recommendation_strategy=recommendation_strategy,
+        score_breakdown=score_breakdown
     )

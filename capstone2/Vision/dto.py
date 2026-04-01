@@ -100,6 +100,15 @@ class RecommendationResponse(BaseModel):
     message: str
 
 
+# 전체 점수 요약
+class ScoreBreakdown(BaseModel):
+    avg_clip_score: float    # 추천 장소 전체 CLIP 유사도 평균
+    avg_tag_score: float     # 추천 장소 전체 태그 점수 평균
+    avg_final_score: float   # 추천 장소 전체 최종 점수 평균
+    top_clip_score: float    # 가장 높은 CLIP 유사도
+    scored_count: int        # 점수가 있는 추천 장소 수
+
+
 # 전체 분석 + 추천 통합 응답
 class FullAnalysisResponse(BaseModel):
     # GPT Vision 분석 결과
@@ -114,3 +123,4 @@ class FullAnalysisResponse(BaseModel):
     # 유사 여행지 추천 (Type B, C일 때)
     recommendations: List[RecommendedPlace] = []
     recommendation_strategy: Optional[str] = None
+    score_breakdown: Optional[ScoreBreakdown] = None
