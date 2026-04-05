@@ -202,3 +202,49 @@ async def add_custom_place(
         "longitude": place.longitude,
         "already_existed": False,
     }
+
+@router.get("/{place_id}")
+async def get_place_detail(
+    place_id: int,
+    db: AsyncSession = Depends(provide_session)
+):
+    """
+    장소 상세 조회
+    
+    place_id로 장소 상세 정보 반환
+    인증 불필요
+    """
+    from sqlalchemy import select
+    
+    result = await db.execute(select(Place).where(Place.id == place_id))
+    place = result.scalar_one_or_none()
+    
+    if not place:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="장소를 찾을 수 없습니다"
+        )
+    
+    return {
+        "success": True,
+        "place": {
+            "id": place.id,
+            "name": place.name,
+            "category": place.category,
+            "address": place.address,
+            "latitude": place.latitude,
+            "longitude": place.longitude,
+            "description": place.description,
+            "image_url": place.image_url,
+            "tags": place.tags,
+            "operating_hours": place.operating_hours,
+            "closed_days": place.closed_days,
+            "fee_info": place.fee_info,
+            "tel": place.tel,
+            "homepage": place.homepage,
+            "is_festival": place.is_festival,
+            "event_start_date": place.event_start_date,
+            "event_end_date": place.event_end_date,
+            "readcount": place.readcount,
+        }
+    }
