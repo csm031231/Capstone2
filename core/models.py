@@ -106,6 +106,8 @@ class Trip(Base):
     generation_method = Column(String, default="manual")      # "ai" 또는 "manual"
     preference_snapshot = Column(JSON, nullable=True)         # 생성 시점 선호도 스냅샷
     thumbnail_url = Column(String, nullable=True)             # 지역 대표 이미지 URL
+    trip_summary = Column(Text, nullable=True)                # AI 생성 전체 여행 요약
+    day_summaries = Column(JSON, nullable=True)               # {"1": {"theme": "...", "summary": "..."}, ...}
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

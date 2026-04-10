@@ -12,6 +12,8 @@ class TripCreate(BaseModel):
     end_date: date = Field(..., description="여행 종료일")
     region: Optional[str] = Field(None, description="지역 (부산, 제주 등)")
     conditions: Optional[dict] = Field(None, description="추가 조건")
+    trip_summary: Optional[str] = Field(None, description="AI 생성 전체 여행 요약")
+    day_summaries: Optional[dict] = Field(None, description='일차별 테마+이유 {"1": {"theme": "...", "summary": "..."}}')
 
 
 class TripUpdate(BaseModel):
@@ -123,6 +125,8 @@ class TripDetailResponse(BaseModel):
     conditions: Optional[dict] = None
     generation_method: str
     total_days: int
+    trip_summary: Optional[str] = None
+    day_summaries: Optional[dict] = None  # {"1": {"theme": "...", "summary": "..."}, ...}
     itineraries: List[ItineraryResponse] = []
     itineraries_by_day: Optional[dict] = None  # {1: [...], 2: [...]}
 

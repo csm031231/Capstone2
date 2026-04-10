@@ -76,6 +76,8 @@ def build_trip_detail_response(trip) -> TripDetailResponse:
         conditions=trip.conditions,
         generation_method=trip.generation_method or "manual",
         total_days=total_days,
+        trip_summary=trip.trip_summary,
+        day_summaries=trip.day_summaries,
         itineraries=itineraries,
         itineraries_by_day=dict(itineraries_by_day)
     )

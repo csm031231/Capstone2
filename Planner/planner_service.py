@@ -104,7 +104,7 @@ class PlannerService:
         # 8단계: DB 저장
         print("[PLANNER] 8단계: DB 저장 시작")
         trip = await self._save_trip(
-            db, user_id, request, constrained, user_preference, photo_url=photo_url
+            db, user_id, request, constrained, user_preference, photo_url=photo_url, draft=draft
         )
         print(f"[PLANNER] 8단계 완료: trip_id={trip.id}")
 
@@ -532,10 +532,25 @@ class PlannerService:
         request: GenerateRequest,
         places_by_day: Dict[int, List[dict]],
         preference: Optional[UserPreference],
-        photo_url: Optional[str] = None
+        photo_url: Optional[str] = None,
+        draft: Optional[dict] = None
     ):
         """Trip 및 Itinerary DB 저장 (단일 트랜잭션)"""
         try:
+            # draft에서 요약/테마 추출
+            trip_summary = draft.get("trip_summary") if draft else None
+            day_summaries = None
+            if draft:
+                raw = draft.get("day_summaries", {})
+                days_list = draft.get("days", [])
+                day_summaries = {
+                    str(d["day_number"]): {
+                        "theme": d.get("theme", ""),
+                        "summary": raw.get(str(d["day_number"]), "")
+                    }
+                    for d in days_list
+                }
+
             # Trip 생성
             trip_data = TripCreate(
                 title=request.title,
@@ -546,7 +561,9 @@ class PlannerService:
                     "max_places_per_day": request.max_places_per_day,
                     "themes": request.themes,
                     "must_visit_places": request.must_visit_places
-                }
+                },
+                trip_summary=trip_summary,
+                day_summaries=day_summaries,
             )
 
             trip = await trip_crud.create_trip(

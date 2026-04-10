@@ -26,7 +26,9 @@ async def create_trip(
         region=data.region,
         conditions=data.conditions,
         generation_method=generation_method,
-        preference_snapshot=preference_snapshot
+        preference_snapshot=preference_snapshot,
+        trip_summary=data.trip_summary if hasattr(data, 'trip_summary') else None,
+        day_summaries=data.day_summaries if hasattr(data, 'day_summaries') else None,
     )
     db.add(trip)
     await db.commit()

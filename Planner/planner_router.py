@@ -297,7 +297,8 @@ async def generate_with_photo(
 
     try:
         trip_data = await planner.generate_itinerary(
-            db, current_user.id, generate_request, preference
+            db, current_user.id, generate_request, preference,
+            photo_url=request.image_url
         )
         return GenerateWithPhotoResponse(
             needs_clarification=False,
