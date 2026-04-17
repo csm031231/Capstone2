@@ -116,7 +116,14 @@ confidence 작성 규칙:
 
 candidates 작성 규칙:
 - 위치를 특정할 수 없으면 두 후보 모두 city: null, confidence: 0.2 이하로 작성
-- 2번째 후보가 의미 없으면 첫 번째보다 낮은 confidence로 null 도시 작성"""
+- 2번째 후보가 의미 없으면 첫 번째보다 낮은 confidence로 null 도시 작성
+
+[자연 경관 특별 지침]
+- 랜드마크를 특정할 수 없어도 scene_type과 travel_tags는 반드시 3개 이상 구체적으로 작성
+- 계곡, 폭포, 오름, 갯벌, 절벽, 섬, 주상절리, 습지, 억새, 단풍 등 지형/식생 특징이 보이면 travel_tags에 반드시 포함
+- 랜드마크를 억지로 작성하지 말고 특정 불가한 경우 landmark를 null로 두되 travel_tags에 집중
+- 자연 사진에서 바다/산/숲/계곡/폭포 등 명확한 지형이 보이면 해당 태그를 travel_tags에 포함
+- scene_type도 "해변", "계곡", "산", "숲" 등 지형을 구체적으로 기재할 것"""
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -233,6 +240,7 @@ def determine_type(analysis: VisionAnalysisResult, exif: Optional[ExifInfo] = No
 
     - Top-1과 Top-2의 confidence 격차를 고려
     - 자연 명소도 landmark로 인식하므로 기준 완화
+    - travel_tags가 풍부하면 자연 경관도 B로 처리 (추천 받을 수 있도록)
     """
     confidence = analysis.confidence
     gap = analysis.confidence_gap
@@ -256,6 +264,12 @@ def determine_type(analysis: VisionAnalysisResult, exif: Optional[ExifInfo] = No
 
     # Type B: 지역은 추정되나 확신 부족
     if confidence >= 0.3:
+        return "B"
+
+    # travel_tags가 3개 이상이면 자연 경관으로 판단 → B로 처리 (추천 활성화)
+    # 자연 사진은 랜드마크 특정이 어려워 confidence가 낮게 나오는 경향이 있음
+    has_rich_tags = len(analysis.travel_tags or []) >= 3
+    if has_rich_tags:
         return "B"
 
     # Type C: 추정 불가

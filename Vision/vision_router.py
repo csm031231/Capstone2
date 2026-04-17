@@ -168,7 +168,7 @@ async def full_analyze(
     # 1. GPT Vision 분석
     analysis_result = await analyze_image_with_gpt(file_path)
 
-    # 1-1. EXIF GPS가 있으면 역지오코딩으로 city/province 보정
+    # 1-1. EXIF GPS가 있으면 역지오코딩으로 city 보정 (가장 정확)
     if exif_info and exif_info.latitude and exif_info.longitude:
         try:
             geo = await reverse_geocode(exif_info.latitude, exif_info.longitude)

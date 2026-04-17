@@ -994,14 +994,15 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         return None
 
     async def _apply_reorder(self, db, trip, change) -> Optional[dict]:
-        """순서 변경 후 같은 날 전체 order_index 재정렬"""
+        """순서 변경 / 다른 일차로 이동 후 관련 일차 전체 order_index + arrival_time 재정렬"""
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
         if not target:
             return None
 
-        new_day = change.get("day_number") or target.day_number
+        src_day = target.day_number
+        new_day = change.get("day_number") or src_day
         new_order = change.get("new_order")
 
         if new_order is None:
@@ -1009,30 +1010,52 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         from Trip.dto import ItineraryUpdate
 
-        # DB 업데이트 전에 같은 날 장소 목록 및 시작 시간 미리 수집
-        same_day_snapshot = sorted(
-            [it for it in trip.itineraries if it.day_number == new_day],
-            key=lambda x: (x.order_index, x.id)
-        )
-        first_time = next((it.arrival_time for it in same_day_snapshot if it.arrival_time is not None), None)
         target_name = target.place.name
+        moving_to_other_day = (src_day != new_day)
 
-        # 대상 장소를 원하는 위치에 끼워넣고 나머지를 순서대로 밀어냄
-        others = [it for it in same_day_snapshot if it.id != target.id]
-        insert_at = max(0, min(new_order - 1, len(others)))
-        ordered = others[:insert_at] + [target] + others[insert_at:]
-
-        # 순서대로 order_index 적용
-        for idx, it in enumerate(ordered, start=1):
-            await trip_crud.update_itinerary(
-                db, it.id,
-                ItineraryUpdate(day_number=new_day, order_index=idx)
+        # ── 출발 일차(src_day) 처리: 장소가 빠진 뒤 order_index + 시간 재정렬 ──
+        if moving_to_other_day:
+            src_snapshot = sorted(
+                [it for it in trip.itineraries
+                 if it.day_number == src_day and it.id != target.id],
+                key=lambda x: (x.order_index, x.id)
+            )
+            src_first_time = next(
+                (it.arrival_time for it in src_snapshot if it.arrival_time is not None), None
+            )
+            for idx, it in enumerate(src_snapshot, start=1):
+                await trip_crud.update_itinerary(
+                    db, it.id, ItineraryUpdate(day_number=src_day, order_index=idx)
+                )
+            src_start_h = src_first_time.hour if src_first_time else 9
+            src_start_m = src_first_time.minute if src_first_time else 0
+            await self._recalculate_day_times(
+                db, src_snapshot, start_hour=src_start_h, start_minute=src_start_m
             )
 
-        # 순서 변경 후 arrival_time 재계산
-        start_h = first_time.hour if first_time else 9
-        start_m = first_time.minute if first_time else 0
-        await self._recalculate_day_times(db, ordered, start_hour=start_h, start_minute=start_m)
+        # ── 목적 일차(new_day) 처리: 장소를 원하는 위치에 끼워넣고 재정렬 ──
+        dst_snapshot = sorted(
+            [it for it in trip.itineraries
+             if it.day_number == new_day and it.id != target.id],
+            key=lambda x: (x.order_index, x.id)
+        )
+        dst_first_time = next(
+            (it.arrival_time for it in dst_snapshot if it.arrival_time is not None), None
+        )
+
+        insert_at = max(0, min(new_order - 1, len(dst_snapshot)))
+        ordered = dst_snapshot[:insert_at] + [target] + dst_snapshot[insert_at:]
+
+        for idx, it in enumerate(ordered, start=1):
+            await trip_crud.update_itinerary(
+                db, it.id, ItineraryUpdate(day_number=new_day, order_index=idx)
+            )
+
+        dst_start_h = dst_first_time.hour if dst_first_time else 9
+        dst_start_m = dst_first_time.minute if dst_first_time else 0
+        await self._recalculate_day_times(
+            db, ordered, start_hour=dst_start_h, start_minute=dst_start_m
+        )
 
         return {
             "action": "reorder",

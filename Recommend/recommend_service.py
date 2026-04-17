@@ -1,3 +1,4 @@
+import random
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from typing import List, Optional, Set
@@ -81,6 +82,8 @@ class ConditionRecommender:
             })
 
         # 3단계: 정렬 및 상위 K개 선택
+        # 동점자 순서 랜덤화: 먼저 섞은 뒤 stable sort → 동점끼리는 랜덤 순서 유지
+        random.shuffle(scored_places)
         scored_places.sort(key=lambda x: x["final_score"], reverse=True)
         top_places = scored_places[:condition.top_k]
 

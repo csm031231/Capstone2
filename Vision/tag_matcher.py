@@ -8,26 +8,59 @@ from typing import List, Dict, Tuple, Optional
 
 # 태그 카테고리 정의 (동의어 매핑)
 TAG_SYNONYMS = {
-    # 자연
-    "바다": ["해변", "ocean", "beach", "sea", "coastal", "해안"],
-    "산": ["mountain", "산악", "등산", "숲", "forest"],
-    "노을": ["sunset", "일몰", "석양"],
-    "호수": ["lake", "저수지", "water"],
+    # 자연 — 해양/수계
+    "바다": ["해변", "ocean", "beach", "sea", "coastal", "해안", "바닷가"],
+    "해변": ["beach", "모래사장", "sand beach", "모래해변", "바닷가"],
+    "노을": ["sunset", "일몰", "석양", "낙조"],
+    "일출": ["sunrise", "새벽", "dawn"],
+    "호수": ["lake", "저수지", "water", "담수"],
+    "강": ["river", "하천", "천", "stream"],
+    "계곡": ["valley", "gorge", "협곡", "물골", "계류"],
+    "폭포": ["waterfall", "falls", "cascade", "폭"],
+    "갯벌": ["tidal flat", "mudflat", "조간대", "갯바위"],
+    "습지": ["wetland", "marsh", "늪", "swamp"],
+
+    # 자연 — 지형
+    "산": ["mountain", "산악", "등산", "봉우리", "peak", "high land"],
+    "숲": ["forest", "나무", "tree", "woodland", "수림"],
+    "공원": ["park", "녹지", "정원", "garden"],
+    "섬": ["island", "islet", "도서", "무인도"],
+    "절벽": ["cliff", "해식애", "암벽", "암봉", "단애"],
+    "오름": ["volcanic hill", "제주오름", "분석구"],
+    "분화구": ["crater", "칼데라", "화산", "volcano"],
+    "주상절리": ["columnar joint", "basalt column", "현무암", "주상"],
+    "기암": ["strange rock", "기암괴석", "암석", "rock formation"],
+
+    # 자연 — 계절/식생
+    "단풍": ["autumn leaves", "가을", "fall foliage", "紅葉"],
+    "벚꽃": ["cherry blossom", "봄꽃", "spring flower", "벚"],
+    "눈": ["snow", "설경", "겨울", "winter", "설산"],
+    "억새": ["silver grass", "pampas grass", "갈대"],
+    "초원": ["meadow", "grassland", "목초지", "들판"],
+
+    # 자연 분위기
+    "자연": ["nature", "자연경관", "경치", "풍경", "landscape"],
+    "전망": ["view", "조망", "뷰", "panorama", "경관"],
+    "포토스팟": ["photo spot", "사진명소", "인스타", "instagram"],
+    "경치": ["scenery", "풍광", "landscape", "view"],
 
     # 도시
     "도시": ["city", "urban", "도심", "시내", "downtown"],
-    "야경": ["night", "nightview", "밤"],
-    "골목": ["alley", "거리", "street"],
+    "야경": ["night", "nightview", "밤", "night view", "야간"],
+    "골목": ["alley", "거리", "street", "골목길"],
+    "번화가": ["shopping street", "상가", "쇼핑", "shopping"],
 
     # 분위기
-    "힐링": ["relaxing", "peaceful", "조용한", "quiet", "calm"],
-    "액티비티": ["activity", "active", "adventure", "레저"],
-    "역사": ["historic", "history", "전통", "traditional", "고궁"],
+    "힐링": ["relaxing", "peaceful", "조용한", "quiet", "calm", "healing", "휴식"],
+    "평화로운": ["peaceful", "serene", "tranquil", "조용한", "잔잔한"],
+    "액티비티": ["activity", "active", "adventure", "레저", "체험", "어드벤처"],
+    "역사": ["historic", "history", "전통", "traditional", "고궁", "유적", "문화재"],
+    "사찰": ["temple", "절", "buddhist", "불교", "암자"],
     "현대": ["modern", "contemporary", "신식"],
 
     # 시설
-    "카페": ["cafe", "coffee", "커피"],
-    "맛집": ["restaurant", "food", "음식점", "식당"],
+    "카페": ["cafe", "coffee", "커피", "브런치", "디저트"],
+    "맛집": ["restaurant", "food", "음식점", "식당", "로컬푸드", "미식"],
     "관광지": ["tourist", "landmark", "명소", "sightseeing"],
 }
 

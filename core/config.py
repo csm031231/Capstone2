@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     kakao_map_api_key: str = ""
     kakao_rest_api_key: str
     tour_api_key: str = ""
-
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8",
