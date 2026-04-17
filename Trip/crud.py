@@ -252,6 +252,18 @@ async def clear_itineraries(db: AsyncSession, trip_id: int) -> int:
     return result.rowcount
 
 
+async def delete_itineraries_beyond_day(db: AsyncSession, trip_id: int, max_day: int) -> int:
+    """날짜 단축 시 범위 초과 itinerary 삭제"""
+    result = await db.execute(
+        delete(Itinerary).where(
+            Itinerary.trip_id == trip_id,
+            Itinerary.day_number > max_day
+        )
+    )
+    await db.commit()
+    return result.rowcount
+
+
 # ==================== Place 조회 헬퍼 ====================
 
 async def get_place_by_id(db: AsyncSession, place_id: int) -> Optional[Place]:

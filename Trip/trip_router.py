@@ -167,12 +167,21 @@ async def update_trip(
             detail="종료일은 시작일보다 이후여야 합니다"
         )
 
-    trip = await crud.update_trip(db, trip_id, current_user.id, data)
-    if not trip:
+    # 날짜 변경 전 기존 trip 조회
+    existing_trip = await crud.get_trip_by_id(db, trip_id, current_user.id)
+    if not existing_trip:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="여행을 찾을 수 없습니다"
         )
+
+    trip = await crud.update_trip(db, trip_id, current_user.id, data)
+
+    # 날짜가 줄어든 경우 범위 초과 itinerary 삭제
+    new_end = data.end_date or existing_trip.end_date
+    new_start = data.start_date or existing_trip.start_date
+    new_total_days = (new_end - new_start).days + 1
+    await crud.delete_itineraries_beyond_day(db, trip_id, new_total_days)
 
     return build_trip_detail_response(trip)
 
@@ -334,6 +343,38 @@ async def reorder_itineraries(
             )
 
     await crud.reorder_itineraries(db, trip_id, data.items)
+
+    # 재정렬 후 일차별 arrival_time 재계산
+    all_itineraries = await crud.get_itineraries_by_trip(db, trip_id)
+    from collections import defaultdict as _defaultdict
+    from datetime import time as _time
+    from Trip.dto import ItineraryUpdate
+
+    by_day = _defaultdict(list)
+    for it in all_itineraries:
+        by_day[it.day_number].append(it)
+
+    for day_its in by_day.values():
+        ordered = sorted(day_its, key=lambda x: x.order_index)
+
+        # expire 전에 필요한 값 미리 추출
+        it_ids = [it.id for it in ordered]
+        stays = [it.stay_duration or 60 for it in ordered]
+        travel_times = [0] + [
+            (ordered[i].travel_time_from_prev or 15)
+            for i in range(1, len(ordered))
+        ]
+
+        # 첫 번째 장소의 기존 arrival_time을 시작 시간으로 사용 (없으면 09:00)
+        first_time = next((it.arrival_time for it in ordered if it.arrival_time), None)
+        current_minutes = (first_time.hour * 60 + first_time.minute) if first_time else 9 * 60
+
+        for i, it_id in enumerate(it_ids):
+            h, m = divmod(current_minutes, 60)
+            if h >= 24:
+                h, m = 23, 59
+            await crud.update_itinerary(db, it_id, ItineraryUpdate(arrival_time=_time(h, m)))
+            current_minutes += stays[i] + (travel_times[i + 1] if i + 1 < len(it_ids) else 0)
 
     # 업데이트된 여행 정보 반환
     updated_trip = await crud.get_trip_by_id(db, trip_id, current_user.id)
