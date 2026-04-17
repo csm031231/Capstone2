@@ -1,8 +1,10 @@
 import asyncio
+import httpx
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, update
 
+from core import config
 from core.models import Place
 from DataCollector.tour_api_service import TourAPIService, get_tour_api_service
 from DataCollector.wikipedia_service import WikipediaService, get_wikipedia_service
@@ -164,6 +166,12 @@ class DataCollectorService:
             # 데이터 파싱
             place_data = self.tour_api.parse_place_data(item, detail)
 
+            # Tour API image_url이 없으면 detailImage2에서 추가 이미지 조회
+            if not place_data.get("image_url") and content_id:
+                extra_image = await self._fetch_additional_image(content_id)
+                if extra_image:
+                    place_data["image_url"] = extra_image
+
             # Wikipedia로 설명 보강
             if enhance_with_wiki and (
                 not place_data.get("description") or
@@ -211,6 +219,10 @@ class DataCollectorService:
         except Exception as e:
             await db.rollback()
             return "error"
+
+    async def _fetch_additional_image(self, content_id: int) -> Optional[str]:
+        """TourAPI detailImage2에서 추가 이미지 URL을 가져옵니다."""
+        return await self.tour_api.get_place_images(content_id)
 
     async def collect_by_keyword(
         self,
@@ -278,6 +290,82 @@ class DataCollectorService:
             "collected": collected,
             "skipped": skipped,
             "errors": len(errors)
+        }
+
+    async def update_missing_images(
+        self,
+        db: AsyncSession,
+        batch_size: int = 100
+    ) -> Dict[str, Any]:
+        """
+        기존 places 중 image_url이 없는 항목을 detailImage2로 보완
+        """
+        # 처리 전 남은 전체 개수
+        count_result = await db.execute(
+            select(func.count()).select_from(Place).where(
+                and_(
+                    Place.image_url.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            )
+        )
+        remaining_before = count_result.scalar() or 0
+
+        result = await db.execute(
+            select(Place).where(
+                and_(
+                    Place.image_url.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            ).order_by(Place.readcount.desc().nullslast()).limit(batch_size)
+        )
+        places = result.scalars().all()
+
+        # place 객체 대신 필요한 데이터 추출 (detached 세션 문제 방지)
+        places_data = [(place.id, place.content_id, place.name) for place in places]
+
+        updated = 0
+        errors = 0
+
+        for place_id, content_id, name in places_data:
+            try:
+                image_url = await self.tour_api.get_place_images(content_id)
+                if image_url:
+                    await db.execute(
+                        update(Place).where(Place.id == place_id).values(image_url=image_url)
+                    )
+                    updated += 1
+                    await db.commit()
+                else:
+                    await db.rollback()
+
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                await db.rollback()
+                errors += 1
+                print(f"[update_missing_images] 오류 place_id={place_id} name={name}: {e}")
+
+        remaining_after = await db.execute(
+            select(func.count()).select_from(Place).where(
+                and_(
+                    Place.image_url.is_(None),
+                    Place.content_id.isnot(None),
+                    Place.content_type_id.isnot(None)
+                )
+            )
+        )
+        remaining_after = remaining_after.scalar() or 0
+
+        return {
+            "success": True,
+            "processed": len(places),
+            "updated": updated,
+            "errors": errors,
+            "remaining_before": remaining_before,
+            "remaining_after": remaining_after,
+            "message": f"{updated}개 이미지 보완 완료"
         }
 
     async def update_missing_data(

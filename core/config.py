@@ -20,8 +20,9 @@ class Settings(BaseSettings):
     kakao_map_api_key: str = ""
     kakao_rest_api_key: str
     tour_api_key: str = ""
+
     model_config = SettingsConfigDict(
-        env_file=".env", 
+        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore"  # <-- 이걸 추가해야 정의되지 않은 다른 .env 값들 때문에 에러나는 걸 막아줍니다.
     )
