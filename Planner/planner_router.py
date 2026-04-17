@@ -140,61 +140,82 @@ async def _find_landmark_place_id(
 ) -> Optional[int]:
     """
     사진에서 감지된 랜드마크명으로 Place ID 반환.
-    1) DB 정확 매칭 → 2) DB 토큰 LIKE 검색 → 3) TourAPI 키워드 검색 후 DB 자동 저장
+    1) DB 정확 매칭
+    2) DB 전체 이름 포함 검색 (readcount 순)
+    3) 모든 토큰 AND 조건 검색 (readcount 순)
+    4) TourAPI 키워드 검색 후 DB 자동 저장 → 재검색
     """
     if not landmark_name:
         return None
 
-    from sqlalchemy import select as _select
+    from sqlalchemy import select as _select, and_ as _and
+    from sqlalchemy.orm import noload as _noload
+    from sqlalchemy import nulls_last
     from core.models import Place as PlaceModel
     import re as _re
+
+    def _run_query(q):
+        return db.execute(q)
+
+    async def _first(q):
+        r = await db.execute(q)
+        return r.scalar_one_or_none()
 
     # ── 1. DB 정확 매칭 ──
     q = _select(PlaceModel).where(PlaceModel.name == landmark_name)
     if region:
         q = q.where(PlaceModel.address.contains(region))
-    result = await db.execute(q)
-    place = result.scalar_one_or_none()
+    place = await _first(q)
     if place:
         return place.id
 
-    # ── 2. DB 토큰 LIKE 검색 (가장 긴 한글 토큰 우선) ──
+    # ── 2. 전체 이름 포함 검색 (readcount 정렬) ──
+    # "해운대 해수욕장" → name.contains("해운대 해수욕장") 로 정확히 매칭
+    q = _select(PlaceModel).where(PlaceModel.name.contains(landmark_name))
+    if region:
+        q = q.where(PlaceModel.address.contains(region))
+    q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(1)
+    place = await _first(q)
+    if place:
+        return place.id
+
+    # ── 3. 토큰 AND 조건 검색 (모든 토큰이 이름에 포함되어야 함) ──
+    # 예: ["해운대", "해수욕장"] → name LIKE '%해운대%' AND name LIKE '%해수욕장%'
+    # 이렇게 하면 "광안리해수욕장"은 "해운대" 토큰을 포함 못하므로 제외됨
     tokens = sorted(
         _re.findall(r'[가-힣]{2,}', landmark_name),
         key=len, reverse=True
     )
-    for token in tokens[:3]:
-        q = _select(PlaceModel).where(PlaceModel.name.contains(token))
+    if len(tokens) >= 2:
+        and_conditions = [PlaceModel.name.contains(t) for t in tokens]
+        q = _select(PlaceModel).where(_and(*and_conditions))
         if region:
             q = q.where(PlaceModel.address.contains(region))
-        q = q.limit(1)
-        result = await db.execute(q)
-        place = result.scalar_one_or_none()
+        q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(1)
+        place = await _first(q)
         if place:
             return place.id
 
-    # ── 3. DB에 없으면 TourAPI로 검색 후 자동 저장 ──
+    # ── 4. TourAPI로 검색 후 자동 저장 → 재검색 ──
     try:
         from DataCollector.collector_service import DataCollectorService
         collector = DataCollectorService()
-        # AREA_CODE 매핑에 맞게 지역명 정규화 (예: "서울특별시" → "서울")
         normalized_region = _normalize_region(region) if region else None
         await collector.collect_by_keyword(
             db=db,
             keyword=landmark_name,
             area_name=normalized_region,
-            max_items=3,          # 상위 3개만 저장 (빠르게)
-            enhance_with_wiki=False  # 속도 우선, 설명 보강 생략
+            max_items=3,
+            enhance_with_wiki=False
         )
 
-        # 저장 후 다시 검색 (토큰 매칭)
-        for token in ([landmark_name] + tokens[:2]):
-            q = _select(PlaceModel).where(PlaceModel.name.contains(token))
+        # 저장 후 전체 이름 포함 검색 우선 시도
+        for keyword in ([landmark_name] + tokens[:2]):
+            q = _select(PlaceModel).where(PlaceModel.name.contains(keyword))
             if region:
                 q = q.where(PlaceModel.address.contains(region))
-            q = q.order_by(PlaceModel.readcount.desc()).limit(1)
-            result = await db.execute(q)
-            place = result.scalar_one_or_none()
+            q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(1)
+            place = await _first(q)
             if place:
                 return place.id
     except Exception:
@@ -262,21 +283,20 @@ async def generate_with_photo(
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
+    # 사진 랜드마크 → must_visit_places 우선 추가 (랜드마크 감지되면 무조건 시도)
     must_visit = list(request.must_visit_places)
-    if photo_city_norm is not None:
-        # photo_landmarks 배열 우선, 없으면 photo_landmark 단수 사용 (하위 호환)
-        all_landmarks = request.photo_landmarks if request.photo_landmarks else (
-            [request.photo_landmark] if request.photo_landmark else []
-        )
-        for i, landmark in enumerate(all_landmarks):
-            if landmark:
-                landmark_id = await _find_landmark_place_id(db, landmark, request.region)
-                if landmark_id and landmark_id not in must_visit:
-                    if i == 0:
-                        must_visit.insert(0, landmark_id)  # 첫 번째(가장 확신 높은) 랜드마크 우선
-                    else:
-                        must_visit.append(landmark_id)
+    # photo_landmarks 배열 우선, 없으면 photo_landmark 단수 사용 (하위 호환)
+    all_landmarks = request.photo_landmarks if request.photo_landmarks else (
+        [request.photo_landmark] if request.photo_landmark else []
+    )
+    for i, landmark in enumerate(all_landmarks):
+        if landmark:
+            landmark_id = await _find_landmark_place_id(db, landmark, request.region)
+            if landmark_id and landmark_id not in must_visit:
+                if i == 0:
+                    must_visit.insert(0, landmark_id)  # 첫 번째(가장 확신 높은) 랜드마크 우선
+                else:
+                    must_visit.append(landmark_id)
 
     # 기존 GenerateRequest로 변환하여 일정 생성
     generate_request = GenerateRequest(
@@ -425,9 +445,9 @@ async def generate_with_photo_upload(
             if t not in merged_themes:
                 merged_themes.append(t)
 
-    # 사진 랜드마크 → must_visit_places 우선 추가 (국내 지역으로 인식된 경우만)
+    # 사진 랜드마크 → must_visit_places 우선 추가 (랜드마크 감지되면 무조건 시도)
     must_visit = list(must_visit_list)
-    if photo_landmark and photo_city_norm is not None:
+    if photo_landmark:
         landmark_id = await _find_landmark_place_id(db, photo_landmark, region)
         if landmark_id and landmark_id not in must_visit:
             must_visit.insert(0, landmark_id)
