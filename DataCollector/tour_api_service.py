@@ -386,6 +386,64 @@ class TourAPIService:
 
         return None
 
+    async def get_detail_image(
+        self,
+        content_id: int
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        관광지 이미지 정보 조회
+
+        Returns:
+            이미지 목록 (originimgurl, smallimageurl 등)
+        """
+        endpoint = f"{self.BASE_URL}/detailImage2"
+        params = {
+            "serviceKey": self.api_key,
+            "MobileOS": "ETC",
+            "MobileApp": "TravelApp",
+            "_type": "json",
+            "contentId": content_id,
+            "imageYN": "Y",
+            "subImageYN": "Y",
+            "numOfRows": 10,
+        }
+
+        t0 = asyncio.get_event_loop().time()
+        try:
+            response = await self._get_with_fallback(endpoint, params)
+            response.raise_for_status()
+            data = response.json()
+        finally:
+            t1 = asyncio.get_event_loop().time()
+            print(f"DEBUG TourAPI.get_detail_image: elapsed={(t1-t0):.3f}s contentId={content_id}")
+
+        # 안전한 items 처리
+        items_container = data.get("response", {}).get("body", {}).get("items") or {}
+        if not isinstance(items_container, dict):
+            return None
+
+        items = items_container.get("item", [])
+        if isinstance(items, list):
+            return items
+        elif isinstance(items, dict):
+            return [items]
+
+        return None
+
+    async def get_place_images(self, content_id: int) -> Optional[str]:
+        """
+        TourAPI detailImage2로 추가 이미지 조회
+
+        Returns:
+            대표 이미지 URL 또는 None
+        """
+        images = await self.get_detail_image(content_id)
+        if not images:
+            return None
+
+        first = images[0]
+        return first.get("originimgurl") or first.get("smallimageurl")
+
     async def get_full_place_info(
         self,
         content_id: int,

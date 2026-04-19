@@ -2,7 +2,7 @@ import logging
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
@@ -133,6 +133,16 @@ async def collect_by_keyword(
     )
 
     return result
+
+
+@router.post("/update/missing-images")
+async def update_missing_images(
+    batch_size: int = Query(default=100, ge=10, le=500, description="한 번에 처리할 개수"),
+    db: AsyncSession = Depends(provide_session)
+):
+    """image_url이 없는 기존 데이터에 TourAPI detailImage2로 보완"""
+    collector = get_collector_service()
+    return await collector.update_missing_images(db=db, batch_size=batch_size)
 
 
 class CollectBulkRequest(BaseModel):
