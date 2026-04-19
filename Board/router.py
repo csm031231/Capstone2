@@ -153,8 +153,8 @@ async def upload_post_image(
     with open(f"{UPLOAD_DIR}/{filename}", "wb") as f:
         f.write(contents)
 
-    base_url = get_config().base_url.rstrip("/")
-    return {"image_url": f"{base_url}/uploads/{filename}"}
+    # 절대 URL 대신 상대 경로만 반환
+    return {"image_url": f"/uploads/{filename}"}
 
 
 # ────────────────────────────────────────────────────────
