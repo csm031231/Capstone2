@@ -81,6 +81,15 @@ class PlannerService:
         places_by_day = self._build_places_by_day(draft, place_dict)
         print(f"[PLANNER] 4단계 완료: {sum(len(v) for v in places_by_day.values())}개 장소 매핑")
 
+        # 4.5단계: must_visit 강제 삽입 (GPT가 누락한 경우 보완)
+        if request.must_visit_places:
+            self._enforce_must_visit(places_by_day, request.must_visit_places, place_dict, total_days)
+
+        # 4.7단계: 식당 근접성 최적화 (동떨어진 식당 → 동선상 가까운 식당으로 교체)
+        print("[PLANNER] 4.7단계: 식당 근접성 최적화 시작")
+        places_by_day = self._optimize_restaurant_proximity(places_by_day, candidates)
+        print("[PLANNER] 4.7단계 완료")
+
         # 5단계: 구조 분리 (식사/야경 위치 확정)
         print("[PLANNER] 5단계: 구조 분리 시작")
         segmented, structural_warnings = self.time_service.structural_split_all(places_by_day)
@@ -524,6 +533,146 @@ class PlannerService:
             result[day_num] = places
 
         return result
+
+    def _enforce_must_visit(
+        self,
+        places_by_day: Dict[int, List[dict]],
+        must_visit_ids: List[int],
+        place_dict: Dict[int, dict],
+        total_days: int
+    ) -> None:
+        """GPT가 필수 장소를 누락한 경우 가장 여유로운 날에 강제 삽입"""
+        all_placed_ids = {
+            p['place_id']
+            for places in places_by_day.values()
+            for p in places
+        }
+
+        for place_id in must_visit_ids:
+            if place_id in all_placed_ids:
+                continue  # 이미 포함됨
+            if place_id not in place_dict:
+                logger.warning(f"must_visit place_id={place_id} 후보 목록에 없어 강제 삽입 불가")
+                continue
+
+            # 장소 수가 가장 적은 날에 삽입
+            target_day = min(
+                range(1, total_days + 1),
+                key=lambda d: len(places_by_day.get(d, []))
+            )
+
+            place = place_dict[place_id].copy()
+            day_places = places_by_day.setdefault(target_day, [])
+
+            place['order_index'] = 1
+            place['suggested_stay_duration'] = place.get('suggested_stay_duration') or 90
+            place['is_night_place'] = False
+            place['selection_reason'] = "사진에서 감지된 필수 방문 장소"
+            place['day_number'] = target_day
+            place['place_category'] = place.get('category')
+            place['place_name'] = place.get('name')
+            place['place_address'] = place.get('address')
+
+            # 앞에 삽입 후 order_index 재정렬
+            day_places.insert(0, place)
+            for i, p in enumerate(day_places, start=1):
+                p['order_index'] = i
+
+            all_placed_ids.add(place_id)
+            logger.info(
+                f"must_visit 강제 삽입: place_id={place_id}, "
+                f"name={place.get('name')}, day={target_day}"
+            )
+
+    def _optimize_restaurant_proximity(
+        self,
+        places_by_day: Dict[int, List[dict]],
+        candidates: List[dict]
+    ) -> Dict[int, List[dict]]:
+        """
+        각 일차의 식당이 그날 다른 장소들과 동떨어져 있으면
+        후보 중 더 가까운 미사용 식당으로 교체한다.
+
+        교체 조건: 대안 식당이 현재보다 2km(위경도 0.02도) 이상 가깝고
+                  현재 거리의 60% 이하일 때
+        """
+        import math
+
+        # 전체 배치된 place_id 집합
+        all_placed_ids = {
+            p['place_id']
+            for places in places_by_day.values()
+            for p in places
+        }
+
+        # 미사용 식당 후보 풀
+        spare_restaurants = [
+            c for c in candidates
+            if c.get('category') == '맛집' and c['place_id'] not in all_placed_ids
+        ]
+
+        def dist(lat1, lng1, lat2, lng2) -> float:
+            return math.sqrt((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2)
+
+        for day_num, places in places_by_day.items():
+            # 비식당 장소들의 평균 좌표 (centroid)
+            non_rest = [
+                p for p in places
+                if p.get('category') != '맛집'
+                and p.get('latitude') and p.get('longitude')
+            ]
+            if not non_rest:
+                continue
+
+            c_lat = sum(p['latitude'] for p in non_rest) / len(non_rest)
+            c_lng = sum(p['longitude'] for p in non_rest) / len(non_rest)
+
+            for i, rest in enumerate(places):
+                if rest.get('category') != '맛집':
+                    continue
+                if not rest.get('latitude') or not rest.get('longitude'):
+                    continue
+
+                cur_dist = dist(rest['latitude'], rest['longitude'], c_lat, c_lng)
+
+                # 더 가까운 대안 탐색
+                best_alt = None
+                best_dist = cur_dist * 0.6  # 최소 40% 개선이어야 교체
+
+                for alt in spare_restaurants:
+                    if not alt.get('latitude') or not alt.get('longitude'):
+                        continue
+                    alt_dist = dist(alt['latitude'], alt['longitude'], c_lat, c_lng)
+                    # 절대 거리도 2km 이상 개선되어야 함 (위경도 0.02 ≈ 2.2km)
+                    if alt_dist < best_dist and (cur_dist - alt_dist) >= 0.02:
+                        best_dist = alt_dist
+                        best_alt = alt
+
+                if best_alt:
+                    logger.info(
+                        f"식당 근접화 day={day_num}: "
+                        f"{rest.get('name')}(d={cur_dist:.4f}) → "
+                        f"{best_alt.get('name')}(d={best_dist:.4f})"
+                    )
+                    # spare pool 업데이트
+                    spare_restaurants.remove(best_alt)
+                    spare_restaurants.append({**rest})  # 교체된 기존 식당 → 다시 후보로
+                    all_placed_ids.discard(rest['place_id'])
+                    all_placed_ids.add(best_alt['place_id'])
+
+                    # 장소 교체 (order_index, stay_duration 등 메타는 유지)
+                    replacement = best_alt.copy()
+                    replacement['order_index'] = rest.get('order_index', i + 1)
+                    replacement['suggested_stay_duration'] = rest.get('suggested_stay_duration', 60)
+                    replacement['is_night_place'] = rest.get('is_night_place', False)
+                    replacement['selection_reason'] = rest.get('selection_reason', 'AI 추천')
+                    replacement['day_number'] = day_num
+                    replacement['place_category'] = best_alt.get('category')
+                    replacement['place_name'] = best_alt.get('name')
+                    replacement['place_address'] = best_alt.get('address')
+                    places[i] = replacement
+
+        return places_by_day
 
     async def _save_trip(
         self,

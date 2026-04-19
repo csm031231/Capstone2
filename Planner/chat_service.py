@@ -639,6 +639,73 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         return None
 
+    async def _search_place_in_db_strict(
+        self,
+        db: AsyncSession,
+        name: str,
+        region: Optional[str]
+    ) -> Optional[Place]:
+        """지역 필터를 끝까지 유지하는 DB 검색 — 교체 시 다른 지역 장소 유입 방지.
+        지역 내에서 못 찾으면 None 반환 (지역 외 결과는 반환하지 않음).
+        """
+        if not name:
+            return None
+
+        import re as _re
+        from sqlalchemy import nulls_last
+
+        search_region = REGION_PREFIX.get(region, region) if region else None
+
+        def apply_region(q):
+            if search_region:
+                return q.where(Place.address.contains(search_region))
+            return q
+
+        # 1. 정확 매칭
+        q = apply_region(select(Place).where(Place.name == name))
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 2. 포함 매칭 (readcount 정렬)
+        q = apply_region(select(Place).where(Place.name.contains(name)))
+        q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+        result = await db.execute(q)
+        place = result.scalar_one_or_none()
+        if place:
+            return place
+
+        # 3. 한글 토큰 AND 조건
+        tokens = sorted(_re.findall(r'[가-힣]{2,}', name), key=len, reverse=True)
+        if len(tokens) >= 2:
+            from sqlalchemy import and_ as _and
+            q = apply_region(select(Place).where(_and(*[Place.name.contains(t) for t in tokens])))
+            q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place
+
+        # 4. TourAPI 검색 후 재시도 (지역 필터 유지)
+        try:
+            from DataCollector.collector_service import DataCollectorService
+            collector = DataCollectorService()
+            await collector.collect_by_keyword(
+                db, keyword=name, area_name=region,
+                max_items=3, enhance_with_wiki=False
+            )
+            q = apply_region(select(Place).where(Place.name.contains(name)))
+            q = q.order_by(nulls_last(Place.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            place = result.scalar_one_or_none()
+            if place:
+                return place
+        except Exception:
+            pass
+
+        return None  # 지역 내 미발견 → None (다른 지역 장소 반환 안 함)
+
     def _find_place_by_name(
         self,
         name: str,
@@ -755,7 +822,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                         applied_changes.append(result)
 
                 elif action == "remove":
-                    result = await self._apply_remove(db, trip, change)
+                    result = await self._apply_remove(db, trip, change, available_places)
                     if result:
                         applied_changes.append(result)
 
@@ -768,7 +835,7 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                             applied_changes.append(result)
 
                 elif action == "reorder":
-                    result = await self._apply_reorder(db, trip, change)
+                    result = await self._apply_reorder(db, trip, change, available_places)
                     if result:
                         applied_changes.append(result)
 
@@ -813,12 +880,26 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             trip_dict = {
                 "id": updated.id,
                 "title": updated.title,
+                "region": updated.region,
+                "start_date": str(updated.start_date),
+                "end_date": str(updated.end_date),
                 "itineraries": [
                     {
                         "id": it.id,
+                        "place_id": it.place_id,
                         "place_name": it.place.name,
+                        "place_category": it.place.category,
+                        "place_address": it.place.address,
+                        "latitude": it.place.latitude,
+                        "longitude": it.place.longitude,
+                        "image_url": it.place.image_url,
                         "day_number": it.day_number,
-                        "order_index": it.order_index
+                        "order_index": it.order_index,
+                        "arrival_time": it.arrival_time.strftime("%H:%M") if it.arrival_time else None,
+                        "stay_duration": it.stay_duration,
+                        "travel_time_from_prev": it.travel_time_from_prev,
+                        "transport_mode": it.transport_mode,
+                        "memo": it.memo,
                     }
                     for it in sorted(
                         updated.itineraries,
@@ -829,16 +910,42 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         return applied_changes, trip_dict, warning_messages
 
+    # 카테고리별 기본 배치 시간 (분 단위)
+    CATEGORY_DEFAULT_MINUTES = {
+        "관광지":    9 * 60,       # 09:00 오전 관광
+        "문화시설":  10 * 60,      # 10:00 오전 문화
+        "카페":      10 * 60,      # 10:00 or 오후 브런치
+        "음식점":    12 * 60,      # 12:00 점심 기본
+        "쇼핑":      14 * 60,      # 14:00 오후 쇼핑
+        "레저/스포츠": 10 * 60,
+        "숙박":      21 * 60,      # 21:00 저녁 체크인
+    }
+    NIGHT_KEYWORDS = ["야경", "야간", "밤", "night", "루프탑"]
+
+    def _estimate_place_minutes(self, place) -> int:
+        """장소의 카테고리/태그 기반으로 적절한 방문 시간(분) 추정"""
+        tags = (place.tags or []) if place else []
+        category = (place.category or "") if place else ""
+
+        if any(kw in str(tags).lower() for kw in self.NIGHT_KEYWORDS):
+            return 19 * 60  # 야경/야간 → 19:00
+
+        return self.CATEGORY_DEFAULT_MINUTES.get(category, 10 * 60)
+
     async def _apply_add(
         self, db, trip, change, available_places, place_id_dict
     ) -> Optional[dict]:
-        """장소 추가"""
+        """장소 추가 — 카테고리/시간 기반으로 적절한 위치에 삽입 후 시간 재계산"""
+        from Trip.dto import ItineraryCreate, ItineraryUpdate
+        from sqlalchemy import select as sa_select
+        from collections import Counter
+        from core.models import Itinerary as ItineraryModel
+
         existing_ids = {it.place_id for it in trip.itineraries}
         place = None
 
         if change.get("place_name"):
             place = self._find_place_by_name(change["place_name"], available_places)
-            # available_places(상위 50개)에 없으면 DB 전체에서 직접 검색
             if not place:
                 place = await self._search_place_in_db(db, change["place_name"], trip.region)
 
@@ -855,35 +962,87 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         if not place:
             return None
 
-        # 중복 장소 차단 — 이미 일정에 있으면 추가하지 않음
         if place.id in existing_ids:
             return None
-
-        from Trip.dto import ItineraryCreate
 
         # day_number 미지정 시 → 장소 수가 가장 적은 날에 자동 배치
         day = change.get("day_number")
         if not day:
-            from collections import Counter
             day_counts = Counter(it.day_number for it in trip.itineraries)
             total_days = (trip.end_date - trip.start_date).days + 1
-            # 모든 일차를 대상으로 하되 기록 없는 날은 0으로 처리
             day = min(range(1, total_days + 1), key=lambda d: day_counts.get(d, 0))
 
-        order = change.get("order_index", 99)
+        # 해당 일차 기존 일정 조회 (arrival_time + place 포함)
+        from sqlalchemy.orm import selectinload as _selectinload
+        result = await db.execute(
+            sa_select(ItineraryModel)
+            .options(_selectinload(ItineraryModel.place))
+            .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+            .order_by(ItineraryModel.order_index, ItineraryModel.id)
+        )
+        day_its = list(result.scalars().all())
 
+        # 삽입 위치 결정
+        if change.get("order_index"):
+            # GPT가 위치를 명시한 경우
+            insert_at = max(0, min(change["order_index"] - 1, len(day_its)))
+        else:
+            # 카테고리/태그 기반으로 시간순 적절한 위치 찾기
+            new_minutes = self._estimate_place_minutes(place)
+            insert_at = len(day_its)  # 기본 마지막
+            for i, it in enumerate(day_its):
+                existing_minutes = (
+                    it.arrival_time.hour * 60 + it.arrival_time.minute
+                    if it.arrival_time else self.CATEGORY_DEFAULT_MINUTES.get(
+                        (it.place.category if it.place else ""), 10 * 60
+                    )
+                )
+                if new_minutes < existing_minutes:
+                    insert_at = i
+                    break
+
+        # 임시로 마지막 order_index로 생성 후 전체 재정렬
+        temp_order = len(day_its) + 1
         await trip_crud.create_itinerary(
             db, trip.id,
-            ItineraryCreate(
-                place_id=place.id,
-                day_number=day,
-                order_index=order
-            )
+            ItineraryCreate(place_id=place.id, day_number=day, order_index=temp_order)
         )
+
+        # 새로 생성된 itinerary 포함해서 재조회
+        result2 = await db.execute(
+            sa_select(ItineraryModel)
+            .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+            .order_by(ItineraryModel.order_index, ItineraryModel.id)
+        )
+        all_its = list(result2.scalars().all())
+
+        # 새 장소를 insert_at 위치로 이동
+        new_it = next((it for it in all_its if it.place_id == place.id), None)
+        others = [it for it in all_its if it.place_id != place.id]
+        ordered = others[:insert_at] + ([new_it] if new_it else []) + others[insert_at:]
+
+        # 커밋 전에 시작 시간 미리 추출 (update loop 후 ORM 객체 expire 방지)
+        first_orig_time = ordered[0].arrival_time if ordered else None
+        start_h = first_orig_time.hour if first_orig_time else 9
+        start_m = first_orig_time.minute if first_orig_time else 0
+
+        # order_index 재정렬
+        for idx, it in enumerate(ordered, start=1):
+            await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+
+        # 업데이트 후 ORM 객체 expire됨 → DB에서 재조회 후 시간 재계산
+        result3 = await db.execute(
+            sa_select(ItineraryModel)
+            .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+            .order_by(ItineraryModel.order_index, ItineraryModel.id)
+        )
+        fresh_ordered = list(result3.scalars().all())
+        await self._recalculate_day_times(db, fresh_ordered, start_hour=start_h, start_minute=start_m)
+
         return {"action": "add", "place_name": place.name, "day_number": day}
 
-    async def _apply_remove(self, db, trip, change) -> Optional[dict]:
-        """장소 제거 후 같은 일차 order_index 재정렬"""
+    async def _apply_remove(self, db, trip, change, available_places: list = None) -> Optional[dict]:
+        """장소 제거 후 같은 일차 order_index 재정렬 + 빈 자리 자동 보충"""
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
@@ -892,35 +1051,147 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 
         removed_day = target.day_number
         removed_name = target.place.name
+        removed_category = target.place.category if target.place else None
 
-        # delete commit 전에 같은 날 나머지 장소의 (id, order_index) 미리 추출
-        # (commit 후 ORM 객체 속성이 expire되어 MissingGreenlet 발생 방지)
-        from Trip.dto import ItineraryUpdate
-        same_day_pairs = sorted(
-            [(it.id, it.order_index) for it in trip.itineraries
-             if it.id != target.id and it.day_number == removed_day],
-            key=lambda x: x[1]
-        )
+        # 커밋 전에 모두 미리 추출 (delete 커밋 후 trip 객체 expire 방지)
+        all_used_ids = {it.place_id for it in trip.itineraries if it.id != target.id}
+        trip_id = trip.id
+        trip_region = trip.region
+
+        from Trip.dto import ItineraryUpdate, ItineraryCreate
+        from sqlalchemy import select as sa_select
+        from core.models import Itinerary as ItineraryModel
 
         await trip_crud.delete_itinerary(db, target.id)
 
-        # 같은 날 남은 장소들을 1부터 연속 재정렬 (구멍 방지)
-        for idx, (it_id, current_order) in enumerate(same_day_pairs, start=1):
-            if current_order != idx:
-                await trip_crud.update_itinerary(db, it_id, ItineraryUpdate(order_index=idx))
+        # 삭제 후 같은 날 남은 장소 재조회
+        result = await db.execute(
+            sa_select(ItineraryModel)
+            .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == removed_day)
+            .order_by(ItineraryModel.order_index, ItineraryModel.id)
+        )
+        remaining = list(result.scalars().all())
 
-        return {"action": "remove", "place_name": removed_name}
+        # ── 빈 자리 자동 보충 ──
+        fill_place = await self._find_fill_place(
+            db, trip_region, removed_category, all_used_ids, available_places or []
+        )
+
+        if fill_place:
+            temp_order = len(remaining) + 1
+            await trip_crud.create_itinerary(
+                db, trip_id,
+                ItineraryCreate(
+                    place_id=fill_place.id,
+                    day_number=removed_day,
+                    order_index=temp_order
+                )
+            )
+            # 새 장소 포함하여 재조회
+            result = await db.execute(
+                sa_select(ItineraryModel)
+                .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == removed_day)
+                .order_by(ItineraryModel.order_index, ItineraryModel.id)
+            )
+            remaining = list(result.scalars().all())
+
+        if not remaining:
+            return {"action": "remove", "place_name": removed_name}
+
+        # 커밋 전 시작 시간 추출
+        first_time = remaining[0].arrival_time
+        start_h = first_time.hour if first_time else 9
+        start_m = first_time.minute if first_time else 0
+
+        # order_index 재정렬
+        for idx, it in enumerate(remaining, start=1):
+            if it.order_index != idx:
+                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+
+        # 재조회 후 시간 재계산
+        result2 = await db.execute(
+            sa_select(ItineraryModel)
+            .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == removed_day)
+            .order_by(ItineraryModel.order_index, ItineraryModel.id)
+        )
+        fresh_remaining = list(result2.scalars().all())
+        await self._recalculate_day_times(db, fresh_remaining, start_hour=start_h, start_minute=start_m)
+
+        result_info = {"action": "remove", "place_name": removed_name}
+        if fill_place:
+            result_info["filled_with"] = fill_place.name
+        return result_info
+
+    async def _find_fill_place(
+        self, db, region: Optional[str], removed_category: Optional[str],
+        all_used_ids: set, available_places: list
+    ) -> Optional[Place]:
+        """
+        제거된 장소를 보충할 미사용 장소 탐색.
+        - 같은 카테고리 우선, 없으면 카테고리 무관
+        - 맛집을 뺀 경우: 다른 맛집으로 보충 (식사 슬롯 유지)
+        - 맛집 외를 뺀 경우: 같은 카테고리 → 관광지/문화시설 순으로 보충
+        """
+        from sqlalchemy import select as sa_select, nulls_last
+        from core.models import Place as PlaceModel
+
+        search_region = REGION_PREFIX.get(region, region) if region else None
+        is_restaurant = removed_category and "맛집" in removed_category
+
+        # ── 맛집을 뺀 경우: 다른 맛집으로 보충 ──
+        if is_restaurant:
+            for p in available_places:
+                if p.id not in all_used_ids and p.category and "맛집" in p.category:
+                    return p
+            # available_places에 없으면 DB에서 조회
+            q = sa_select(PlaceModel).where(PlaceModel.category == "맛집")
+            if search_region:
+                q = q.where(PlaceModel.address.contains(search_region))
+            q = q.where(~PlaceModel.id.in_(all_used_ids))
+            q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(1)
+            result = await db.execute(q)
+            return result.scalar_one_or_none()
+
+        # ── 맛집 외를 뺀 경우 ──
+        # 1. available_places에서 같은 카테고리 미사용 장소
+        if removed_category:
+            for p in available_places:
+                if p.id not in all_used_ids and p.category and removed_category in p.category:
+                    return p
+
+        # 2. available_places에서 관광지/문화시설 우선, 그다음 맛집 외 전체
+        for cat in [removed_category, "관광지", "문화시설", None]:
+            for p in available_places:
+                if p.id not in all_used_ids and "맛집" not in (p.category or ""):
+                    if cat is None or (p.category and cat in p.category):
+                        return p
+
+        # 3. DB에서 같은 지역 인기순
+        q = sa_select(PlaceModel)
+        if search_region:
+            q = q.where(PlaceModel.address.contains(search_region))
+        if removed_category:
+            q = q.where(PlaceModel.category == removed_category)
+        q = q.where(~PlaceModel.id.in_(all_used_ids))
+        q = q.where(PlaceModel.category != "맛집")
+        q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(1)
+        result = await db.execute(q)
+        return result.scalar_one_or_none()
 
     async def _apply_replace(
         self, db, trip, change, available_places, place_id_dict
     ) -> Optional[dict]:
         """장소 교체 (source_place_id / target_search_keyword 지원)"""
+        # 커밋 전에 미리 추출 (이후 trip.itineraries expire 방지)
+        existing_ids = {it.place_id for it in trip.itineraries}
+        itineraries_snapshot = list(trip.itineraries)
+
         # ── 뺄 장소(old) 찾기 ──
         old_it = None
 
         # source_place_id로 직접 매핑 (가장 정확)
         if change.get("source_place_id"):
-            for it in trip.itineraries:
+            for it in itineraries_snapshot:
                 if it.place_id == change["source_place_id"]:
                     old_it = it
                     break
@@ -928,57 +1199,59 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         # old_place 이름으로 폴백
         if not old_it:
             old_it = self._find_itinerary_by_name(
-                change.get("old_place", ""), trip.itineraries
+                change.get("old_place", ""), itineraries_snapshot
             )
 
         # day_number + target_category 기반 폴백 (카테고리로 해당 날 장소 찾기)
         if not old_it and change.get("day_number") and change.get("target_category"):
             day = change["day_number"]
             cat = change["target_category"]
-            for it in trip.itineraries:
+            for it in itineraries_snapshot:
                 if it.day_number == day and it.place.category and cat in it.place.category:
                     old_it = it
                     break
 
-        # ── 넣을 장소(new) 찾기 ──
+        # ── 넣을 장소(new) 찾기 — 반드시 같은 지역 내에서만 ──
         new_place = None
+        region = trip.region  # 지역 미리 추출
 
-        # target_search_keyword: 검색 키워드로 available_places에서 찾기 → 없으면 DB 직접 검색
+        # target_search_keyword: available_places 우선, DB 폴백은 지역 필터 강제
         if change.get("target_search_keyword"):
             new_place = self._find_place_by_name(
                 change["target_search_keyword"], available_places
             )
             if not new_place:
-                new_place = await self._search_place_in_db(
-                    db, change["target_search_keyword"], trip.region
+                new_place = await self._search_place_in_db_strict(
+                    db, change["target_search_keyword"], region
                 )
 
         # new_place 이름으로 폴백
-        if not new_place:
+        if not new_place and change.get("new_place"):
             new_place = self._find_place_by_name(
-                change.get("new_place", ""), available_places
+                change["new_place"], available_places
             )
-            if not new_place and change.get("new_place"):
-                new_place = await self._search_place_in_db(
-                    db, change["new_place"], trip.region
+            if not new_place:
+                new_place = await self._search_place_in_db_strict(
+                    db, change["new_place"], region
                 )
 
         # place_id로 직접 매핑
         if not new_place and change.get("place_id"):
             new_place = place_id_dict.get(change["place_id"])
 
-        # target_category로 폴백 (카테고리 내 첫 번째 미사용 장소)
-        if not new_place and change.get("target_category"):
-            existing_ids = {it.place_id for it in trip.itineraries}
-            cat = change["target_category"]
-            for p in available_places:
-                if p.id not in existing_ids and p.category and cat in p.category:
-                    new_place = p
-                    break
+        # target_category로 폴백 (카테고리 내 첫 번째 미사용 장소, available_places = 지역 필터됨)
+        # 이름 검색이 실패한 경우에도 같은 카테고리로 자동 대체
+        if not new_place:
+            cat = change.get("target_category") or (old_it.place.category if old_it else None)
+            if cat:
+                for p in available_places:
+                    if p.id not in existing_ids and p.category and cat in p.category:
+                        new_place = p
+                        break
 
         if old_it and new_place:
             # 새 장소가 이미 다른 날 일정에 있으면 교체 불가 (교체될 old 장소는 제외하고 체크)
-            already_used = {it.place_id for it in trip.itineraries if it.id != old_it.id}
+            already_used = {it.place_id for it in itineraries_snapshot if it.id != old_it.id}
             if new_place.id in already_used:
                 return {"_blocked": f"'{new_place.name}'은(는) 이미 다른 날 일정에 포함되어 있어 교체할 수 없습니다. 원하시는 식당 이름을 직접 말씀해 주세요"}
             from Trip.dto import ItineraryUpdate
@@ -993,8 +1266,13 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             }
         return None
 
-    async def _apply_reorder(self, db, trip, change) -> Optional[dict]:
-        """순서 변경 / 다른 일차로 이동 후 관련 일차 전체 order_index + arrival_time 재정렬"""
+    async def _apply_reorder(self, db, trip, change, available_places: list = None) -> Optional[dict]:
+        """순서 변경 / 다른 일차로 이동 후 관련 일차 전체 order_index + arrival_time 재정렬
+        다른 날로 이동 시 출발 일차에 빈 자리 자동 보충"""
+        from Trip.dto import ItineraryUpdate, ItineraryCreate
+        from sqlalchemy import select as sa_select
+        from core.models import Itinerary as ItineraryModel
+
         target = self._find_itinerary_by_name(
             change.get("place_name", ""), trip.itineraries
         )
@@ -1005,64 +1283,134 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         new_day = change.get("day_number") or src_day
         new_order = change.get("new_order")
 
-        if new_order is None:
-            return None
-
-        from Trip.dto import ItineraryUpdate
-
+        # 커밋 전에 모두 미리 추출 (이후 trip 객체 expire 방지)
         target_name = target.place.name
+        target_category = target.place.category if target.place else None
+        target_id = target.id
+        trip_id = trip.id
+        trip_region = trip.region
+        all_used_ids = {it.place_id for it in trip.itineraries}
         moving_to_other_day = (src_day != new_day)
 
-        # ── 출발 일차(src_day) 처리: 장소가 빠진 뒤 order_index + 시간 재정렬 ──
+        # ── 1. target을 목적 일차로 이동 ──
+        await trip_crud.update_itinerary(
+            db, target_id, ItineraryUpdate(day_number=new_day)
+        )
+
+        # ── 2. 출발 일차에 빈 자리 보충 (다른 날로 이동한 경우만) ──
         if moving_to_other_day:
-            src_snapshot = sorted(
-                [it for it in trip.itineraries
-                 if it.day_number == src_day and it.id != target.id],
-                key=lambda x: (x.order_index, x.id)
+            fill_place = await self._find_fill_place(
+                db, trip_region, target_category, all_used_ids, available_places or []
             )
-            src_first_time = next(
-                (it.arrival_time for it in src_snapshot if it.arrival_time is not None), None
-            )
-            for idx, it in enumerate(src_snapshot, start=1):
-                await trip_crud.update_itinerary(
-                    db, it.id, ItineraryUpdate(day_number=src_day, order_index=idx)
+            if fill_place:
+                # src_day의 현재 장소 수 파악
+                cnt_result = await db.execute(
+                    sa_select(ItineraryModel)
+                    .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == src_day)
                 )
-            src_start_h = src_first_time.hour if src_first_time else 9
-            src_start_m = src_first_time.minute if src_first_time else 0
-            await self._recalculate_day_times(
-                db, src_snapshot, start_hour=src_start_h, start_minute=src_start_m
+                src_count = len(cnt_result.scalars().all())
+                await trip_crud.create_itinerary(
+                    db, trip_id,
+                    ItineraryCreate(
+                        place_id=fill_place.id,
+                        day_number=src_day,
+                        order_index=src_count + 1
+                    )
+                )
+                all_used_ids.add(fill_place.id)
+
+        # ── 3. 영향받는 일차들을 DB에서 재조회 후 정렬 + 시간 재계산 ──
+        affected_days = {src_day, new_day} if moving_to_other_day else {src_day}
+        from sqlalchemy.orm import selectinload as _selectinload
+
+        for day in affected_days:
+            result = await db.execute(
+                sa_select(ItineraryModel)
+                .options(_selectinload(ItineraryModel.place))
+                .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == day)
+                .order_by(ItineraryModel.order_index, ItineraryModel.id)
             )
+            day_its = list(result.scalars().all())
 
-        # ── 목적 일차(new_day) 처리: 장소를 원하는 위치에 끼워넣고 재정렬 ──
-        dst_snapshot = sorted(
-            [it for it in trip.itineraries
-             if it.day_number == new_day and it.id != target.id],
-            key=lambda x: (x.order_index, x.id)
-        )
-        dst_first_time = next(
-            (it.arrival_time for it in dst_snapshot if it.arrival_time is not None), None
-        )
+            if not day_its:
+                continue
 
-        insert_at = max(0, min(new_order - 1, len(dst_snapshot)))
-        ordered = dst_snapshot[:insert_at] + [target] + dst_snapshot[insert_at:]
+            # 목적 일차: target을 적절한 위치에 삽입
+            if day == new_day:
+                others = [it for it in day_its if it.id != target_id]
+                target_it = next((it for it in day_its if it.id == target_id), None)
+                if target_it is None:
+                    continue
+                if new_order is not None:
+                    insert_at = max(0, min(new_order - 1, len(others)))
+                else:
+                    insert_at = self._find_insert_position(target_it, others)
+                ordered = others[:insert_at] + [target_it] + others[insert_at:]
+            else:
+                # 출발 일차: 남은 장소 순서 그대로 (보충된 장소 포함)
+                ordered = day_its
 
-        for idx, it in enumerate(ordered, start=1):
-            await trip_crud.update_itinerary(
-                db, it.id, ItineraryUpdate(day_number=new_day, order_index=idx)
+            if not ordered:
+                continue
+
+            # 커밋 전 시작 시간 추출
+            first_time = ordered[0].arrival_time
+            start_h = first_time.hour if first_time else 9
+            start_m = first_time.minute if first_time else 0
+
+            # order_index 정리
+            for idx, it in enumerate(ordered, start=1):
+                if it.order_index != idx:
+                    await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
+
+            # 재조회 후 시간 재계산
+            result_fresh = await db.execute(
+                sa_select(ItineraryModel)
+                .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == day)
+                .order_by(ItineraryModel.order_index, ItineraryModel.id)
             )
-
-        dst_start_h = dst_first_time.hour if dst_first_time else 9
-        dst_start_m = dst_first_time.minute if dst_first_time else 0
-        await self._recalculate_day_times(
-            db, ordered, start_hour=dst_start_h, start_minute=dst_start_m
-        )
+            fresh_day = list(result_fresh.scalars().all())
+            await self._recalculate_day_times(db, fresh_day, start_hour=start_h, start_minute=start_m)
 
         return {
             "action": "reorder",
             "place_name": target_name,
             "day_number": new_day,
-            "order_index": new_order
+            "order_index": new_order or 999
         }
+
+    def _find_insert_position(self, target_it, others: list) -> int:
+        """
+        arrival_time 기준으로 target을 삽입할 위치 결정.
+        arrival_time 없으면 카테고리 기반 추정 시간 사용.
+        """
+        CATEGORY_DEFAULT_HOUR = {
+            "음식점": 12,   # 점심대
+            "카페": 10,
+            "문화시설": 10,
+            "관광지": 9,
+            "쇼핑": 14,
+            "숙박": 21,
+        }
+        NIGHT_KEYWORDS = ["야경", "야간", "밤", "night"]
+
+        def to_minutes(it) -> int:
+            if it.arrival_time:
+                return it.arrival_time.hour * 60 + it.arrival_time.minute
+            # 카테고리로 추정
+            category = (it.place.category if it.place else None) or ""
+            tags = (it.place.tags if it.place else None) or []
+            # 야경 태그 있으면 저녁
+            if any(kw in str(tags).lower() for kw in NIGHT_KEYWORDS):
+                return 19 * 60
+            return CATEGORY_DEFAULT_HOUR.get(category, 10) * 60
+
+        target_minutes = to_minutes(target_it)
+
+        for i, other in enumerate(others):
+            if to_minutes(other) > target_minutes:
+                return i
+        return len(others)  # 모든 장소보다 늦으면 마지막
 
     async def _recalculate_day_times(self, db, ordered_itineraries: list, start_hour: int = 9, start_minute: int = 0):
         """순서 변경 후 arrival_time을 체인 방식으로 재계산.
