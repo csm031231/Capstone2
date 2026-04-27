@@ -1052,6 +1052,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         removed_day = target.day_number
         removed_name = target.place.name
         removed_category = target.place.category if target.place else None
+        removed_order = target.order_index          # 삭제 전 순서 (1-based)
+        removed_arrival = target.arrival_time       # 삭제 전 도착 시간
 
         # 커밋 전에 모두 미리 추출 (delete 커밋 후 trip 객체 expire 방지)
         all_used_ids = {it.place_id for it in trip.itineraries if it.id != target.id}
@@ -1061,6 +1063,8 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         from Trip.dto import ItineraryUpdate, ItineraryCreate
         from sqlalchemy import select as sa_select
         from core.models import Itinerary as ItineraryModel
+
+        logger.info(f"[remove] '{removed_name}' 삭제 (day={removed_day}, order={removed_order})")
 
         await trip_crud.delete_itinerary(db, target.id)
 
@@ -1076,8 +1080,26 @@ replace 액션에는 다음 필드를 최대한 채우세요:
         fill_place = await self._find_fill_place(
             db, trip_region, removed_category, all_used_ids, available_places or []
         )
+        logger.info(f"[remove] fill 탐색 결과: {fill_place.name if fill_place else 'None'}")
 
         if fill_place:
+            # 제거된 장소의 도착 시간 기준으로 삽입 위치 결정 (아침 슬롯 보호)
+            target_min = (
+                (removed_arrival.hour * 60 + removed_arrival.minute)
+                if removed_arrival else self._estimate_place_minutes(fill_place)
+            )
+
+            # remaining 중 target_min보다 늦은 첫 위치에 삽입
+            insert_at = len(remaining)
+            for i, it in enumerate(remaining):
+                it_min = (
+                    it.arrival_time.hour * 60 + it.arrival_time.minute
+                    if it.arrival_time else 10 * 60
+                )
+                if it_min > target_min:
+                    insert_at = i
+                    break
+
             temp_order = len(remaining) + 1
             await trip_crud.create_itinerary(
                 db, trip_id,
@@ -1087,21 +1109,31 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                     order_index=temp_order
                 )
             )
-            # 새 장소 포함하여 재조회
+            # fill 포함하여 재조회
             result = await db.execute(
                 sa_select(ItineraryModel)
                 .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == removed_day)
                 .order_by(ItineraryModel.order_index, ItineraryModel.id)
             )
-            remaining = list(result.scalars().all())
+            all_its = list(result.scalars().all())
+
+            # fill을 올바른 위치로 삽입
+            fill_it = next((it for it in all_its if it.place_id == fill_place.id), None)
+            others = [it for it in all_its if it.place_id != fill_place.id]
+            remaining = others[:insert_at] + ([fill_it] if fill_it else []) + others[insert_at:]
 
         if not remaining:
             return {"action": "remove", "place_name": removed_name}
 
-        # 커밋 전 시작 시간 추출
-        first_time = remaining[0].arrival_time
-        start_h = first_time.hour if first_time else 9
-        start_m = first_time.minute if first_time else 0
+        # 시작 시간 결정:
+        # 삭제된 장소가 첫 번째였으면 그 장소의 도착 시간(=당일 시작)을 그대로 사용
+        if removed_order == 1:
+            start_h = removed_arrival.hour if removed_arrival else 9
+            start_m = removed_arrival.minute if removed_arrival else 0
+        else:
+            first_time = remaining[0].arrival_time
+            start_h = first_time.hour if first_time else 9
+            start_m = first_time.minute if first_time else 0
 
         # order_index 재정렬
         for idx, it in enumerate(remaining, start=1):
