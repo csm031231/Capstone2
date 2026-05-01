@@ -54,8 +54,9 @@ def build_trip_detail_response(trip) -> TripDetailResponse:
     """Trip 모델을 TripDetailResponse로 변환"""
     total_days = (trip.end_date - trip.start_date).days + 1
 
-    # 일정 변환
-    itineraries = [build_itinerary_response(it) for it in trip.itineraries]
+    # 일정 변환 (day_number → order_index 순 정렬)
+    sorted_itineraries = sorted(trip.itineraries, key=lambda x: (x.day_number, x.order_index))
+    itineraries = [build_itinerary_response(it) for it in sorted_itineraries]
 
     # 일차별 그룹화
     itineraries_by_day = defaultdict(list)
@@ -183,6 +184,8 @@ async def update_trip(
     new_total_days = (new_end - new_start).days + 1
     await crud.delete_itineraries_beyond_day(db, trip_id, new_total_days)
 
+    # 삭제 반영된 최신 상태로 재조회
+    trip = await crud.get_trip_by_id(db, trip_id, current_user.id)
     return build_trip_detail_response(trip)
 
 
