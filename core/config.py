@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     jwt_token_expire_minutes: int = 60 * 24  
 
-    base_url: str = "http://13.209.43.0:8000"
+    base_url: str = "http://43.200.169.98:8000"
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
