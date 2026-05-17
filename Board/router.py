@@ -153,8 +153,7 @@ async def upload_post_image(
     with open(f"{UPLOAD_DIR}/{filename}", "wb") as f:
         f.write(contents)
 
-    base_url = get_config().base_url.rstrip("/")
-    return {"image_url": f"{base_url}/uploads/{filename}"}
+    return {"image_url": f"/uploads/{filename}"}
 
 # ────────────────────────────────────────────────────────
 # 게시글 엔드포인트
