@@ -92,6 +92,7 @@ class GenerateResponse(BaseModel):
     total_places: int
     total_travel_time: int
     optimization_score: float = Field(description="동선 최적화 점수 (0-1)")
+    thumbnail_url: Optional[str] = None
 
     # AI 요약
     trip_summary: str
@@ -113,6 +114,9 @@ class GenerateWithPhotoRequest(BaseModel):
     max_places_per_day: int = Field(default=10, ge=2, le=20)
     start_location: Optional[Dict[str, float]] = None
     end_location: Optional[Dict[str, float]] = None
+
+    # 업로드/분석된 사진 URL
+    image_url: Optional[str] = Field(None, description="업로드된 사진 URL")
 
     # 사진 분석 결과 (vision/analyze 응답값)
     photo_city: Optional[str] = Field(None, description="사진에서 감지된 도시")

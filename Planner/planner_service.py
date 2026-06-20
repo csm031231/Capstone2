@@ -833,6 +833,7 @@ class PlannerService:
             total_places=total_places,
             total_travel_time=total_travel,
             optimization_score=round(opt_score, 2),
+            thumbnail_url=trip.thumbnail_url,
             trip_summary=trip_summary,
             generation_method="ai"
         )
