@@ -25,7 +25,7 @@ class ChatService:
 
 사용자가 일정 수정을 요청하면:
 1. 요청을 정확히 이해합니다
-2. 필요한 변경 사항을 파악합니다
+2. 필요한 변경 사항을 모두 파악합니다 (복합 요청이면 여러 action을 changes 배열에 모두 담으세요)
 3. 변경 사항을 JSON 형식으로 반환합니다
 
 ## 지원하는 액션
@@ -35,7 +35,7 @@ class ChatService:
 - reorder: 특정 장소 하나를 특정 번호 위치로 이동 (new_order 필드 사용, 반드시 현재 일정에서 정확한 위치 번호 지정)
 - swap_places: 같은 일차 내 두 장소의 위치를 서로 교환 (place_a, place_b 필드 사용)
 - swap_days: 두 일차의 모든 장소를 통째로 교환 (day_a, day_b 필드 사용)
-- modify: 시간/메모 수정
+- modify: 체류시간/시작시간/메모 수정 (arrival_time: "HH:MM", stay_duration: 분 단위)
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
 - change_duration: 여행 전체 기간(일수) 변경 — 늘리거나 줄이기
@@ -44,27 +44,45 @@ class ChatService:
 - optimize_route: 현재 장소는 유지하고 이동 동선만 최적화
 - question: 추가 정보 필요
 
+## 복합 요청 처리 원칙 (매우 중요)
+하나의 메시지에 여러 요청이 담겨있으면 반드시 changes 배열에 모든 액션을 담으세요.
+action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도 됩니다.
+
+예: "12시 이후로 시작하고 장소 하나 줄여줘"
+→ changes에 [modify(첫 장소 arrival_time="12:00"), remove(덜 중요한 장소)] 두 개를 모두 담는다.
+
+예: "오전 일정 빼고 오후 2시부터 시작하게 해줘"
+→ changes에 [remove(오전 장소들), modify(첫 번째 남은 장소 arrival_time="14:00")] 담는다.
+
+예: "카페 빼고 체류시간도 줄여줘"
+→ changes에 [remove(카페), modify(다른 장소 stay_duration 축소)] 담는다.
+
 ## 언제 어떤 액션을 쓸지 판단 기준
 - 특정 장소 하나를 추가/제거/교체/시간수정 → add/remove/replace/modify
-- "A랑 B 자리 바꿔줘", "A와 B 순서 교환", "오전 관광지 순서 바꿔줘" 등 두 장소를 서로 맞교환 → swap_places (place_a, place_b에 각각 장소명)
+- "A랑 B 자리 바꿔줘", "A와 B 순서 교환" 등 두 장소를 서로 맞교환 → swap_places (place_a, place_b에 각각 장소명)
 - "A를 첫 번째로", "B를 3번째로" 등 특정 장소를 특정 위치로 이동 → reorder (new_order에 반드시 정확한 위치 번호)
-- "N일차랑 M일차 바꿔줘", "N일차와 M일차를 교환해줘" 등 일차 전체 교환 → swap_days
-- "X 테마로 바꿔줘", "전체 다시 짜줘", "X일차 새로 만들어줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
-- "하루 더", "이틀 줄여", "3박4일로 바꿔", "N일 늘려줘", "N박N일로 변경" 등 기간 자체 변경 → change_duration
-- "동선 최적화해줘", "이동거리 줄여줘", "순서 효율적으로" → optimize_route
-- "힘들다", "빡세다", "너무 많아", "지친다" 등 피로·부담 호소 → modify(체류시간 축소) 또는 remove(덜 중요한 일정 삭제). 요청이 전반적 분위기 전환이면 regenerate
-- 요청이 너무 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true로 설정하고 response_message에서 선호도를 되물어봄
+- "N일차랑 M일차 바꿔줘" 등 일차 전체 교환 → swap_days
+- "X 테마로 바꿔줘", "전체 다시 짜줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
+- "하루 더", "이틀 줄여", "3박4일로 바꿔" 등 기간 자체 변경 → change_duration
+- "동선 최적화해줘", "이동거리 줄여줘" → optimize_route
+- "힘들다", "빡세다", "너무 많아" 등 피로·부담 호소 → remove(덜 중요한 장소) + modify(체류시간 축소) 복합 사용
+- "간소화", "단순하게", "줄여줘" → 덜 중요한 장소 remove 여러 개
+- "~시부터 시작", "~시 이후로" → 첫 장소에 modify(arrival_time) 적용하면 이후 모든 장소 시간이 자동 연쇄 조정됨
+- 요청이 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true 설정
 
 ## 응답 형식 (JSON만 출력)
 {
   "understood": true,
-  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|change_duration|optimize_route|question",
+  "action_type": "add|remove|replace|reorder|swap_places|swap_days|modify|regenerate|change_duration|optimize_route|compound|question",
   "changes": [
     {
-      "action": "add",
-      "place_name": "추가할 장소명",
-      "day_number": 1,
-      "order_index": 2
+      "action": "modify",
+      "place_name": "첫 번째 장소명",
+      "arrival_time": "12:00"
+    },
+    {
+      "action": "remove",
+      "place_name": "덜 중요한 장소명"
     }
   ],
   "response_message": "사용자에게 보여줄 친절한 응답",
@@ -73,20 +91,18 @@ class ChatService:
 }
 
 ## replace 액션의 상세 필드
-replace 액션에는 다음 필드를 최대한 채우세요:
 {
   "action": "replace",
   "day_number": 2,
-  "source_place_id": 456,           // 현재 일정에서 뺄 장소의 ID (현재 일정 목록에서 찾아 매핑)
-  "old_place": "뺄 장소명",          // 뺄 장소명 (ID 보조용)
-  "target_category": "카페",         // 넣을 장소의 카테고리 (특정 장소 미지정 시)
-  "target_search_keyword": "스타벅스 해운대점"  // 사용자가 특정 장소를 지목한 경우 검색 키워드
+  "source_place_id": 456,
+  "old_place": "뺄 장소명",
+  "target_category": "카페",
+  "target_search_keyword": "스타벅스 해운대점"
 }
 
 ## needs_confirmation 활용 가이드
-- 사용자가 "아무 카페나", "맛집 하나", "뭔가 추가해줘"처럼 기준이 없는 요청을 하면 needs_confirmation: true 설정
-- response_message에서 구체적 선호도를 되물어봄 (예: "어떤 분위기의 카페를 원하세요? 뷰가 좋은 곳, 디저트 전문점, 조용한 분위기 중 선택해 주세요")
-- 단, 카테고리+일차가 명확하면 바로 처리 (needs_confirmation: false)
+- "아무 카페나", "뭔가 추가해줘"처럼 기준이 없는 요청 → needs_confirmation: true
+- 카테고리+일차가 명확하면 바로 처리 (needs_confirmation: false)
 
 ## 예시 요청과 응답
 
@@ -105,11 +121,17 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 사용자: "해운대 체류시간 2시간으로 바꿔줘"
 응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "해운대해수욕장", "stay_duration": 120}], "response_message": "해운대해수욕장 체류시간을 2시간으로 변경했어요.", "needs_confirmation": false}
 
-사용자: "일정이 너무 빡세"
-응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "가장 덜 중요한 장소명"}], "response_message": "일정이 빡빡하군요! 덜 중요한 장소를 제거해서 여유를 드릴게요.", "needs_confirmation": false}
+사용자: "1일차를 12시 이후로 조정하고 간소화해줘"
+응답: {"action_type": "compound", "changes": [{"action": "modify", "place_name": "1일차 첫 번째 장소명", "arrival_time": "12:00"}, {"action": "remove", "place_name": "1일차에서 덜 중요한 장소명"}], "response_message": "1일차 시작을 12시로 조정하고 장소 하나를 줄였어요!", "needs_confirmation": false}
 
-사용자: "걷기 힘들어, 쉬고 싶어"
-응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "체류 시간이 짧은 장소명", "stay_duration": 90}], "response_message": "체류 시간을 늘려서 여유롭게 쉬실 수 있도록 조정할게요.", "needs_confirmation": false}
+사용자: "오후 2시부터 시작하게 바꿔줘"
+응답: {"action_type": "modify", "changes": [{"action": "modify", "place_name": "첫 번째 장소명", "arrival_time": "14:00"}], "response_message": "첫 일정을 오후 2시부터 시작하도록 변경했어요. 이후 일정도 자동으로 조정됩니다.", "needs_confirmation": false}
+
+사용자: "일정이 너무 빡세"
+응답: {"action_type": "compound", "changes": [{"action": "remove", "place_name": "가장 덜 중요한 장소명"}, {"action": "modify", "place_name": "체류 시간이 짧은 장소명", "stay_duration": 90}], "response_message": "일정이 빡빡하군요! 장소 하나를 빼고 체류 시간도 여유있게 조정했어요.", "needs_confirmation": false}
+
+사용자: "간소화해줘"
+응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "덜 중요한 장소명1"}, {"action": "remove", "place_name": "덜 중요한 장소명2"}], "response_message": "일정을 간소화했어요!", "needs_confirmation": false}
 
 사용자: "힐링 테마로 전체 다시 짜줘"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["힐링", "자연"], "requirements": "힐링·자연 위주, 복잡한 도심보다 조용한 명소"}], "response_message": "전체 일정을 힐링 테마로 새로 구성할게요!", "needs_confirmation": false}
@@ -117,35 +139,20 @@ replace 액션에는 다음 필드를 최대한 채우세요:
 사용자: "2일차를 쇼핑 위주로 바꿔줘"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": 2, "themes": ["쇼핑"], "requirements": "쇼핑·맛집 위주로 배치"}], "response_message": "2일차를 쇼핑 중심으로 재구성할게요!", "needs_confirmation": false}
 
-사용자: "야경 명소 많이 넣어서 처음부터 다시"
-응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["야경"], "requirements": "야경 명소를 저녁 이후 반드시 포함, 야간 관광 위주"}], "response_message": "야경 위주로 전체 일정을 새로 만들게요!", "needs_confirmation": false}
-
 사용자: "해운대랑 감천문화마을 자리 바꿔줘"
 응답: {"action_type": "swap_places", "changes": [{"action": "swap_places", "place_a": "해운대해수욕장", "place_b": "감천문화마을"}], "response_message": "해운대해수욕장과 감천문화마을의 순서를 교환할게요!", "needs_confirmation": false}
-
-사용자: "2번째랑 4번째 순서 바꿔줘"
-응답: {"action_type": "swap_places", "changes": [{"action": "swap_places", "place_a": "2번째 장소명", "place_b": "4번째 장소명"}], "response_message": "2번째와 4번째 장소 순서를 교환할게요!", "needs_confirmation": false}
 
 사용자: "1일차랑 4일차 바꿔줘"
 응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 1, "day_b": 4}], "response_message": "1일차와 4일차를 통째로 교환할게요!", "needs_confirmation": false}
 
-사용자: "3일차와 5일차를 교환해줘"
-응답: {"action_type": "swap_days", "changes": [{"action": "swap_days", "day_a": 3, "day_b": 5}], "response_message": "3일차와 5일차 일정을 서로 바꿀게요!", "needs_confirmation": false}
-
 사용자: "동선이 너무 비효율적이야, 최적화해줘"
 응답: {"action_type": "optimize_route", "changes": [{"action": "optimize_route"}], "response_message": "이동 동선을 최적화할게요!", "needs_confirmation": false}
 
-사용자: "맛집 더 넣어줘"
-응답: {"action_type": "add", "changes": [{"action": "add", "category": "맛집", "day_number": 1}, {"action": "add", "category": "맛집", "day_number": 2}], "response_message": "각 일차에 맛집을 추가할게요!", "needs_confirmation": false}
-
 사용자: "카페빼고 식당 2개 넣어줘"
-응답: {"action_type": "replace", "changes": [{"action": "remove", "place_name": "카페"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}
+응답: {"action_type": "compound", "changes": [{"action": "remove", "place_name": "카페명"}, {"action": "add", "category": "맛집"}, {"action": "add", "category": "맛집"}], "response_message": "카페를 빼고 식당 2곳을 추가할게요!", "needs_confirmation": false}
 
 사용자: "하루 더 추가해줘"
 응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": 1}], "response_message": "여행을 하루 늘려서 새 일차 일정을 만들게요!", "needs_confirmation": false}
-
-사용자: "5박6일을 3박4일로 줄여줘"
-응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "new_total_days": 4}], "response_message": "여행을 4일로 줄이고 마지막 일차 일정을 삭제할게요!", "needs_confirmation": false}
 
 사용자: "이틀 줄여줘"
 응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": -2}], "response_message": "여행을 이틀 줄이고 마지막 두 일차 일정을 삭제할게요!", "needs_confirmation": false}"""
@@ -1386,9 +1393,16 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 continue
 
             # 커밋 전 시작 시간 추출
-            first_time = ordered[0].arrival_time
-            start_h = first_time.hour if first_time else 9
-            start_m = first_time.minute if first_time else 0
+            # 목적 일차로 이동한 경우: 기존 장소(others)의 시작 시간 기준
+            # (이동해온 장소는 원래 일차 시간을 갖고 있으므로 기준으로 쓰면 안 됨)
+            if day == new_day and moving_to_other_day:
+                ref_time = others[0].arrival_time if others else None
+                start_h = ref_time.hour if ref_time else 9
+                start_m = ref_time.minute if ref_time else 0
+            else:
+                first_time = ordered[0].arrival_time
+                start_h = first_time.hour if first_time else 9
+                start_m = first_time.minute if first_time else 0
 
             # order_index 정리
             for idx, it in enumerate(ordered, start=1):
@@ -1490,7 +1504,12 @@ replace 액션에는 다음 필드를 최대한 채우세요:
             return None
 
         from Trip.dto import ItineraryUpdate
+        from sqlalchemy import select as sa_select
+        from core.models import Itinerary as ItineraryModel
+
         update_data = {}
+        target_day = target.day_number
+        trip_id = trip.id
 
         if change.get("stay_duration") is not None:
             update_data["stay_duration"] = change["stay_duration"]
@@ -1504,6 +1523,21 @@ replace 액션에는 다음 필드를 최대한 채우세요:
                 db, target.id,
                 ItineraryUpdate(**update_data)
             )
+
+            # arrival_time 또는 stay_duration 변경 시 당일 전체 시간 연쇄 재계산
+            if "arrival_time" in update_data or "stay_duration" in update_data:
+                result = await db.execute(
+                    sa_select(ItineraryModel)
+                    .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == target_day)
+                    .order_by(ItineraryModel.order_index, ItineraryModel.id)
+                )
+                day_its = list(result.scalars().all())
+                if day_its:
+                    first_time = day_its[0].arrival_time
+                    start_h = first_time.hour if first_time else 9
+                    start_m = first_time.minute if first_time else 0
+                    await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
+
             return {"action": "modify", "place_name": target.place.name, **update_data}
         return None
 
