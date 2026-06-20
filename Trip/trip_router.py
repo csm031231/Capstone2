@@ -117,6 +117,15 @@ async def get_my_trips(
     trips = await crud.get_trips_by_user(db, current_user.id, skip, limit)
     total = await crud.count_trips_by_user(db, current_user.id)
 
+    def _get_list_image_url(trip):
+        if trip.thumbnail_url:
+            return trip.thumbnail_url
+        if trip.itineraries:
+            first_place = trip.itineraries[0].place if trip.itineraries[0].place else None
+            if first_place and first_place.image_url:
+                return first_place.image_url
+        return None
+
     trip_responses = [
         TripResponse(
             id=trip.id,
@@ -125,6 +134,7 @@ async def get_my_trips(
             end_date=trip.end_date,
             region=trip.region,
             thumbnail_url=trip.thumbnail_url,
+            image_url=_get_list_image_url(trip),
             conditions=trip.conditions,
             generation_method=trip.generation_method or "manual",
             created_at=trip.created_at.isoformat() if trip.created_at else None,

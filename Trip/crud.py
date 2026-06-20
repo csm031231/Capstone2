@@ -60,7 +60,9 @@ async def get_trips_by_user(
     limit: int = 20
 ) -> List[Trip]:
     """사용자의 여행 목록 조회"""
-    query = select(Trip).where(
+    query = select(Trip).options(
+        selectinload(Trip.itineraries).selectinload(Itinerary.place)
+    ).where(
         Trip.user_id == user_id
     ).order_by(Trip.created_at.desc()).offset(skip).limit(limit)
 

@@ -82,6 +82,7 @@ class PostSummary(BaseModel):
     travel_end_date: Optional[date] = None
     tags: Optional[List[str]] = None
     thumbnail_url: Optional[str] = None
+    image_url: Optional[str] = None
     view_count: int
     like_count: int
     comment_count: int

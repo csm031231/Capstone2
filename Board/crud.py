@@ -71,7 +71,10 @@ async def get_posts(
     """게시글 목록 조회 (페이지네이션). (items, total) 반환"""
     query = (
         select(TravelPost)
-        .options(selectinload(TravelPost.user))
+        .options(
+            selectinload(TravelPost.user),
+            selectinload(TravelPost.images)
+        )
         .order_by(TravelPost.created_at.desc())
     )
     count_query = select(func.count()).select_from(TravelPost)
@@ -103,7 +106,10 @@ async def get_posts_by_user(
     """내가 쓴 글 목록 조회 (페이지네이션). (items, total) 반환"""
     query = (
         select(TravelPost)
-        .options(selectinload(TravelPost.user))
+        .options(
+            selectinload(TravelPost.user),
+            selectinload(TravelPost.images)
+        )
         .where(TravelPost.user_id == user_id)
         .order_by(TravelPost.created_at.desc())
     )
@@ -326,7 +332,10 @@ async def get_liked_posts_by_user(
     query = (
         select(TravelPost)
         .join(PostLike, PostLike.post_id == TravelPost.id)
-        .options(selectinload(TravelPost.user))
+        .options(
+            selectinload(TravelPost.user),
+            selectinload(TravelPost.images)
+        )
         .where(base_where)
         .order_by(PostLike.created_at.desc())
         .offset(skip)

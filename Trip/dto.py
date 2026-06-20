@@ -105,6 +105,7 @@ class TripResponse(BaseModel):
     end_date: date
     region: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    image_url: Optional[str] = None
     conditions: Optional[dict] = None
     generation_method: str
     created_at: Optional[str] = None

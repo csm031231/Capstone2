@@ -68,6 +68,11 @@ async def get_optional_user(
 # ────────────────────────────────────────────────────────
 
 def _build_summary(post, is_liked: bool = False) -> PostSummary:
+    fallback_image = None
+    if post.images:
+        sorted_images = sorted(post.images, key=lambda x: x.order_index)
+        fallback_image = sorted_images[0].image_url if sorted_images else None
+
     return PostSummary(
         id=post.id,
         author=AuthorInfo(id=post.user.id, nickname=post.user.nickname),
@@ -79,6 +84,7 @@ def _build_summary(post, is_liked: bool = False) -> PostSummary:
         travel_end_date=post.travel_end_date,
         tags=post.tags,
         thumbnail_url=post.thumbnail_url,
+        image_url=post.thumbnail_url or fallback_image,
         view_count=post.view_count,
         like_count=post.like_count,
         comment_count=post.comment_count,
