@@ -31,7 +31,7 @@ class ChatService:
 ## 지원하는 액션
 - add: 새 장소 추가 (category: 카테고리명 / tags: 속성 태그 배열 / place_name: 특정 장소명)
   태그 예시: ["야경", "포토스팟", "힐링", "바다", "숲", "조용한", "실내", "체험"]
-- remove: 기존 장소 제거
+- remove: 기존 장소 제거 (no_fill: true 추가 시 빈 자리를 자동으로 채우지 않고 그대로 비워둠)
 - replace: 장소 교체
 - reorder: 특정 장소 하나를 특정 번호 위치로 이동 (new_order 필드 사용, 반드시 현재 일정에서 정확한 위치 번호 지정)
 - swap_places: 같은 일차 내 두 장소의 위치를 서로 교환 (place_a, place_b 필드 사용)
@@ -72,7 +72,9 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 - "하루 더", "이틀 줄여", "3박4일로 바꿔" 등 기간 자체 변경 → change_duration
 - "동선 최적화해줘", "이동거리 줄여줘" → optimize_route
 - "힘들다", "빡세다", "너무 많아" 등 피로·부담 호소 → bulk_modify(stay_duration_delta=-20) + remove(덜 중요한 장소) 복합 사용
-- "간소화", "단순하게", "줄여줘" → 덜 중요한 장소 remove 여러 개
+- "넉넉하게", "여유있게", "느긋하게" 등 여유 요청 → 덜 중요한 장소 remove(no_fill: true) 1~2개로 일정 줄이기
+- "간소화", "단순하게", "줄여줘" → 덜 중요한 장소 remove(no_fill: true) 여러 개
+- "그자리 비워놔", "빈 자리로 놔둬", "채우지 마" 등 → remove에 no_fill: true 추가
 - "체류시간 다 늘려줘/줄여줘", "1일차 전체 30분 앞당겨줘", "맛집 체류시간 1시간으로" → bulk_modify
 - "~시부터 시작", "~시 이후로" → 첫 장소에 modify(arrival_time) 적용하면 이후 모든 장소 시간이 자동 연쇄 조정됨
 - 요청이 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true 설정
@@ -119,6 +121,9 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 사용자: "감천문화마을 빼줘"
 응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "감천문화마을"}], "response_message": "감천문화마을을 일정에서 제거했어요.", "needs_confirmation": false}
 
+사용자: "사라오름 빼고 그자리 비워놔"
+응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "사라오름", "no_fill": true}], "response_message": "사라오름을 빼고 그 자리를 비워뒀어요.", "needs_confirmation": false}
+
 사용자: "2일차 카페를 스타벅스 해운대점으로 바꿔줘"
 응답: {"action_type": "replace", "changes": [{"action": "replace", "day_number": 2, "source_place_id": null, "old_place": null, "target_category": "카페", "target_search_keyword": "스타벅스 해운대점"}], "response_message": "2일차 카페를 스타벅스 해운대점으로 교체할게요!", "needs_confirmation": false}
 
@@ -138,7 +143,10 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 응답: {"action_type": "compound", "changes": [{"action": "remove", "place_name": "가장 덜 중요한 장소명"}, {"action": "modify", "place_name": "체류 시간이 짧은 장소명", "stay_duration": 90}], "response_message": "일정이 빡빡하군요! 장소 하나를 빼고 체류 시간도 여유있게 조정했어요.", "needs_confirmation": false}
 
 사용자: "간소화해줘"
-응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "덜 중요한 장소명1"}, {"action": "remove", "place_name": "덜 중요한 장소명2"}], "response_message": "일정을 간소화했어요!", "needs_confirmation": false}
+응답: {"action_type": "remove", "changes": [{"action": "remove", "place_name": "덜 중요한 장소명1", "no_fill": true}, {"action": "remove", "place_name": "덜 중요한 장소명2", "no_fill": true}], "response_message": "일정을 간소화했어요!", "needs_confirmation": false}
+
+사용자: "수월봉 빼고 일정 좀 넉넉하게 해줘"
+응답: {"action_type": "compound", "changes": [{"action": "remove", "place_name": "수월봉", "no_fill": true}, {"action": "remove", "place_name": "일정 중 덜 중요한 장소명", "no_fill": true}], "response_message": "수월봉을 빼고 장소 하나를 더 줄여서 여유있게 조정했어요.", "needs_confirmation": false}
 
 사용자: "힐링 테마로 전체 다시 짜줘"
 응답: {"action_type": "regenerate", "changes": [{"action": "regenerate", "scope": "full", "themes": ["힐링", "자연"], "requirements": "힐링·자연 위주, 복잡한 도심보다 조용한 명소"}], "response_message": "전체 일정을 힐링 테마로 새로 구성할게요!", "needs_confirmation": false}
@@ -453,6 +461,8 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 filled = c.get("filled_with")
                 if filled:
                     parts.append(f"{pname}을(를) 삭제하고 {filled}로 채웠습니다")
+                elif c.get("no_fill"):
+                    parts.append(f"{pname}을(를) 삭제하고 그 자리를 비워뒀습니다")
                 else:
                     parts.append(f"{pname}을(를) 일정에서 삭제했습니다")
 
@@ -594,6 +604,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 
         # 힌트 카테고리가 있으면 해당 카테고리 위주로 조회 (카테고리당 20개 → 토큰 절약)
         if categories:
+            from sqlalchemy import cast, Text
             for cat in categories:
                 query = select(Place)
                 if search_region:
@@ -605,10 +616,28 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                     .limit(20)
                 )
                 result = await db.execute(query)
-                for p in result.scalars().all():
+                cat_places = result.scalars().all()
+                for p in cat_places:
                     if p.id not in seen_ids:
                         collected.append(p)
                         seen_ids.add(p.id)
+
+                # DB에 해당 카테고리가 없으면 (카페, 쇼핑 등) 태그 텍스트로 폴백
+                if not cat_places:
+                    tag_q = select(Place)
+                    if search_region:
+                        tag_q = tag_q.where(Place.address.contains(search_region))
+                    tag_q = (
+                        tag_q
+                        .where(cast(Place.tags, Text).contains(f'"{cat}"'))
+                        .order_by(nulls_last(Place.readcount.desc()))
+                        .limit(20)
+                    )
+                    result = await db.execute(tag_q)
+                    for p in result.scalars().all():
+                        if p.id not in seen_ids:
+                            collected.append(p)
+                            seen_ids.add(p.id)
 
         # 힌트가 없거나 결과 부족 시 전체 인기순으로 보완 (최대 50개 → 토큰 절약)
         if len(collected) < 30:
@@ -1191,7 +1220,11 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         from collections import Counter
         from core.models import Itinerary as ItineraryModel
 
-        existing_ids = {it.place_id for it in trip.itineraries}
+        # DB에서 현재 실제 상태로 재조회 (이전 remove/fill이 이미 반영됐을 수 있어 스냅샷 사용 금지)
+        _cur = await db.execute(
+            sa_select(ItineraryModel.place_id).where(ItineraryModel.trip_id == trip.id)
+        )
+        existing_ids = {row[0] for row in _cur.fetchall()}
         place = None
 
         if change.get("place_name"):
@@ -1210,7 +1243,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                     break
             # available_places에 없으면 DB에서 직접 조회 (카테고리 전용 폴백)
             if not place:
-                from sqlalchemy import nulls_last
+                from sqlalchemy import nulls_last, cast, Text
                 from core.models import Place as PlaceModel
                 search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
                 q = select(PlaceModel).where(PlaceModel.category == cat)
@@ -1219,6 +1252,26 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 q = q.where(~PlaceModel.id.in_(existing_ids))
                 q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(10)
                 result = await db.execute(q)
+                for p in result.scalars().all():
+                    if p.id not in existing_ids:
+                        place = p
+                        break
+            # 카테고리 이름이 DB에 없는 경우 (예: "카페", "쇼핑") → tags 텍스트 검색
+            if not place:
+                from sqlalchemy import nulls_last, cast, Text
+                from core.models import Place as PlaceModel
+                search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+                tag_q = select(PlaceModel)
+                if search_region:
+                    tag_q = tag_q.where(PlaceModel.address.contains(search_region))
+                tag_q = (
+                    tag_q
+                    .where(cast(PlaceModel.tags, Text).contains(f'"{cat}"'))
+                    .where(~PlaceModel.id.in_(existing_ids))
+                    .order_by(nulls_last(PlaceModel.readcount.desc()))
+                    .limit(10)
+                )
+                result = await db.execute(tag_q)
                 for p in result.scalars().all():
                     if p.id not in existing_ids:
                         place = p
@@ -1315,8 +1368,10 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
 
         # 업데이트 후 ORM 객체 expire됨 → DB에서 재조회 후 시간 재계산
+        from sqlalchemy.orm import selectinload as _selectinload
         result3 = await db.execute(
             sa_select(ItineraryModel)
+            .options(_selectinload(ItineraryModel.place))
             .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
             .order_by(ItineraryModel.order_index, ItineraryModel.id)
         )
@@ -1393,11 +1448,16 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         )
         remaining = list(result.scalars().all())
 
-        # ── 빈 자리 자동 보충 ──
-        fill_place = await self._find_fill_place(
-            db, trip_region, removed_category, all_used_ids, available_places or []
-        )
-        logger.info(f"[remove] fill 탐색 결과: {fill_place.name if fill_place else 'None'}")
+        # ── 빈 자리 자동 보충 (no_fill: true 이면 채우지 않음) ──
+        no_fill = change.get("no_fill", False)
+        fill_place = None
+        if not no_fill:
+            fill_place = await self._find_fill_place(
+                db, trip_region, removed_category, all_used_ids, available_places or []
+            )
+            logger.info(f"[remove] fill 탐색 결과: {fill_place.name if fill_place else 'None'}")
+        else:
+            logger.info("[remove] no_fill=true, 자동 보충 생략")
 
         if fill_place:
             # 제거된 장소의 도착 시간 기준으로 삽입 위치 결정 (아침 슬롯 보호)
@@ -1457,9 +1517,11 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             if it.order_index != idx:
                 await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
 
-        # 재조회 후 시간 재계산
+        # 재조회 후 시간 재계산 (place 포함 eager load 필수 — lazy load는 async에서 실패)
+        from sqlalchemy.orm import selectinload as _selectinload
         result2 = await db.execute(
             sa_select(ItineraryModel)
+            .options(_selectinload(ItineraryModel.place))
             .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == removed_day)
             .order_by(ItineraryModel.order_index, ItineraryModel.id)
         )
@@ -1469,6 +1531,8 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         result_info = {"action": "remove", "place_name": removed_name}
         if fill_place:
             result_info["filled_with"] = fill_place.name
+        if no_fill:
+            result_info["no_fill"] = True
         return result_info
 
     async def _find_fill_place(
@@ -1727,9 +1791,11 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 if it.order_index != idx:
                     await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(order_index=idx))
 
-            # 재조회 후 시간 재계산
+            # 재조회 후 시간 재계산 (place eager load 필수)
+            from sqlalchemy.orm import selectinload as _selectinload
             result_fresh = await db.execute(
                 sa_select(ItineraryModel)
+                .options(_selectinload(ItineraryModel.place))
                 .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == day)
                 .order_by(ItineraryModel.order_index, ItineraryModel.id)
             )
