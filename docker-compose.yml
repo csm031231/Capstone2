@@ -3,7 +3,7 @@ version: "3.9"
 services:
   app:
     build:
-      context: ./capstone2
+      context: .
     container_name: capstone2_app
     ports:
       - "8000:8000"
