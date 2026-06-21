@@ -1644,7 +1644,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         start_hour: int = 9,
         start_minute: int = 0,
         pace_buffer: int = 15,
-    ):
+    ) -> list:
         """순서 변경 후 arrival_time을 체인 방식으로 재계산.
 
         초기 생성과 동일한 시간 제약을 적용:
@@ -1652,14 +1652,23 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         - 페이스 기반 버퍼 (기본 moderate=15분)
         - 식사 시간대 snapping (11:30 전→11:30, 14:00~17:30 사이→17:30)
         - 야경 장소 20:00 이전이면 push
+        - 영업시간 초과 시 경고
+        - 22:00 이후 배치 시 경고
+
+        Returns: 경고 메시지 리스트
         """
         from datetime import time as time_type
         from Trip.dto import ItineraryUpdate
         from services.kakao_service import get_route_info
         from Planner.constants import LUNCH_START, LUNCH_END, EARLY_DINNER_START, NIGHT_START
+        from Planner.time_constraint import get_time_constraint_service
 
         if not ordered_itineraries:
-            return
+            return []
+
+        tc = get_time_constraint_service()
+        warnings = []
+        LATE_HOUR = 22 * 60  # 22:00 이후면 경고
 
         MEAL_CATS = {'맛집', '식당'}
         NIGHT_KEYWORDS = {"야경", "야간", "night", "루프탑", "야시장", "불꽃", "일몰", "노을", "선셋"}
@@ -1668,11 +1677,11 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         # commit 후 SQLAlchemy expire 방지: 필요한 값 미리 추출
         it_ids = [it.id for it in ordered_itineraries]
         stays = [it.stay_duration or 60 for it in ordered_itineraries]
+        places = [getattr(it, 'place', None) for it in ordered_itineraries]
 
         categories = []
         is_night_flags = []
-        for it in ordered_itineraries:
-            place = getattr(it, 'place', None)
+        for place in places:
             cat = (place.category if place else None) or ""
             categories.append(cat)
             tags = (place.tags if place else None) or []
@@ -1688,10 +1697,8 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         # 카카오 API로 이동 시간 재계산
         travel_times = [0]
         for i in range(1, len(ordered_itineraries)):
-            prev = ordered_itineraries[i - 1]
-            curr = ordered_itineraries[i]
-            prev_place = getattr(prev, 'place', None)
-            curr_place = getattr(curr, 'place', None)
+            prev_place = places[i - 1]
+            curr_place = places[i]
 
             travel_time = 15
             if (prev_place and curr_place
@@ -1706,7 +1713,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                     if duration > 0:
                         travel_time = max(int(duration / 60), 5)
                 except Exception:
-                    travel_time = getattr(prev, 'travel_time_from_prev', None) or 15
+                    travel_time = getattr(ordered_itineraries[i - 1], 'travel_time_from_prev', None) or 15
             travel_times.append(travel_time)
 
         LUNCH_S = LUNCH_START.hour * 60 + LUNCH_START.minute        # 690 (11:30)
@@ -1735,6 +1742,25 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 h, m = 23, 59
             new_arrival = time_type(h, m)
 
+            # 영업시간 초과 체크
+            place = places[i]
+            pname = (place.name if place else None) or "장소"
+            if place and getattr(place, 'operating_hours', None):
+                try:
+                    _, closes = tc._parse_operating_hours(place.operating_hours)
+                    if closes:
+                        close_min = closes.hour * 60 + closes.minute
+                        if arrival_minutes > close_min:
+                            warnings.append(
+                                f"{pname} 영업 마감({closes.strftime('%H:%M')})보다 늦게 도착 예정({h:02d}:{m:02d})"
+                            )
+                except Exception:
+                    pass
+
+            # 22:00 이후 경고 (야경 장소 제외)
+            if arrival_minutes >= LATE_HOUR and not is_night_flags[i]:
+                warnings.append(f"{pname} 도착이 {h:02d}:{m:02d}으로 너무 늦습니다. 일정이 빡빡합니다")
+
             update_fields = {"arrival_time": new_arrival}
             if i > 0:
                 update_fields["travel_time_from_prev"] = travel_times[i]
@@ -1745,6 +1771,8 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             )
 
             current_minutes = arrival_minutes + stays[i] + pace_buffer
+
+        return warnings
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
         """시간/메모 수정"""
@@ -1776,9 +1804,12 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             )
 
             # arrival_time 또는 stay_duration 변경 시 당일 시간 연쇄 재계산
+            recalc_warnings = []
             if "arrival_time" in update_data or "stay_duration" in update_data:
+                from sqlalchemy.orm import selectinload as _selectinload
                 result = await db.execute(
                     sa_select(ItineraryModel)
+                    .options(_selectinload(ItineraryModel.place))
                     .where(ItineraryModel.trip_id == trip_id, ItineraryModel.day_number == target_day)
                     .order_by(ItineraryModel.order_index, ItineraryModel.id)
                 )
@@ -1794,15 +1825,18 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                         anchor_time = day_its[target_idx].arrival_time
                         start_h = anchor_time.hour if anchor_time else 9
                         start_m = anchor_time.minute if anchor_time else 0
-                        await self._recalculate_day_times(db, sub_list, start_hour=start_h, start_minute=start_m)
+                        recalc_warnings = await self._recalculate_day_times(db, sub_list, start_hour=start_h, start_minute=start_m)
                     else:
                         # 첫 번째 장소 시간 변경이거나 stay_duration만 변경: 전체 재계산
                         first_time = day_its[0].arrival_time
                         start_h = first_time.hour if first_time else 9
                         start_m = first_time.minute if first_time else 0
-                        await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
+                        recalc_warnings = await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
 
-            return {"action": "modify", "place_name": target.place.name, **update_data}
+            result_dict = {"action": "modify", "place_name": target.place.name, **update_data}
+            if recalc_warnings:
+                result_dict["warning"] = " / ".join(recalc_warnings)
+            return result_dict
         return None
 
     async def _apply_regenerate(

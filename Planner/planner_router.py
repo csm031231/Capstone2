@@ -549,11 +549,19 @@ async def get_chat_history(
             detail="채팅 세션을 찾을 수 없습니다"
         )
 
+    import re as _re
+
+    def _strip_result(content: str) -> str:
+        return _re.sub(r'\n?\[변경결과:.*?\]$', '', content, flags=_re.DOTALL).strip()
+
     return ChatHistoryResponse(
         session_id=session.id,
         trip_id=session.trip_id,
         messages=[
-            ChatMessage(role=m["role"], content=m["content"])
+            ChatMessage(
+                role=m["role"],
+                content=_strip_result(m["content"]) if m["role"] == "assistant" else m["content"]
+            )
             for m in (session.messages or [])
         ],
         current_state=session.current_state
@@ -588,11 +596,19 @@ async def get_latest_chat_history_by_trip(
             detail="해당 여행의 채팅 세션을 찾을 수 없습니다"
         )
 
+    import re as _re
+
+    def _strip_result(content: str) -> str:
+        return _re.sub(r'\n?\[변경결과:.*?\]$', '', content, flags=_re.DOTALL).strip()
+
     return ChatHistoryResponse(
         session_id=session.id,
         trip_id=session.trip_id,
         messages=[
-            ChatMessage(role=m["role"], content=m["content"])
+            ChatMessage(
+                role=m["role"],
+                content=_strip_result(m["content"]) if m["role"] == "assistant" else m["content"]
+            )
             for m in (session.messages or [])
         ],
         current_state=session.current_state
