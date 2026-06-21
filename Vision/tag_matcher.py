@@ -127,7 +127,7 @@ def calculate_tag_score(place_tags: List[str], query_tags: List[str]) -> float:
     coverage = len(intersection) / len(query_set)
 
     # 가중 평균 (커버율에 더 높은 가중치)
-    score = jaccard * 0.4 + coverage * 0.6
+    score = jaccard * 0.3 + coverage * 0.7
 
     return min(score, 1.0)
 

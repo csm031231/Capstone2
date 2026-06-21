@@ -38,7 +38,7 @@ class TimeConstraintService:
     PACE_CONFIG = {
         "relaxed": {
             "stay_multiplier": 1.3,
-            "buffer_time": 30
+            "buffer_time": 20
         },
         "moderate": {
             "stay_multiplier": 1.0,
@@ -103,7 +103,10 @@ class TimeConstraintService:
         if not dinner:
             warnings.append(f"{day_num}일차: 저녁 식당이 없습니다")
 
-        split = min(len(others) // 2, 2)
+        if len(others) <= 1:
+            split = len(others)  # 1개 이하면 전부 morning, afternoon 비움
+        else:
+            split = min(len(others) // 2, 2)
         afternoon = others[split:]
 
         # 야경 장소가 없고 오후 장소가 2개 이상이면 마지막 오후 장소를 저녁 이후로 이동
@@ -372,6 +375,10 @@ class TimeConstraintService:
         """영업시간 문자열 파싱"""
         if not hours_str:
             return None, None
+
+        ALWAYS_OPEN = {"24시간", "연중무휴", "24hours", "24 hours", "항상"}
+        if any(kw in hours_str for kw in ALWAYS_OPEN):
+            return time(0, 0), time(23, 59)
 
         try:
             # "09:00 - 18:00" 또는 "09:00~18:00" 형식

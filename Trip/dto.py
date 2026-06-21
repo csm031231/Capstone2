@@ -45,6 +45,7 @@ class ItineraryUpdate(BaseModel):
     order_index: Optional[int] = Field(None, ge=1)
     arrival_time: Optional[time] = None
     stay_duration: Optional[int] = Field(None, ge=10, le=480)
+    travel_time_from_prev: Optional[int] = None
     memo: Optional[str] = None
     transport_mode: Optional[str] = None
 

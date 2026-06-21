@@ -266,9 +266,9 @@ def determine_type(analysis: VisionAnalysisResult, exif: Optional[ExifInfo] = No
     if confidence >= 0.3:
         return "B"
 
-    # travel_tags가 3개 이상이면 자연 경관으로 판단 → B로 처리 (추천 활성화)
+    # travel_tags가 4개 이상이면 자연 경관으로 판단 → B로 처리 (추천 활성화)
     # 자연 사진은 랜드마크 특정이 어려워 confidence가 낮게 나오는 경향이 있음
-    has_rich_tags = len(analysis.travel_tags or []) >= 3
+    has_rich_tags = len(analysis.travel_tags or []) >= 4
     if has_rich_tags:
         return "B"
 

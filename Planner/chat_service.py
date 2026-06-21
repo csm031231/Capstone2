@@ -29,13 +29,18 @@ class ChatService:
 3. 변경 사항을 JSON 형식으로 반환합니다
 
 ## 지원하는 액션
-- add: 새 장소 추가
+- add: 새 장소 추가 (category: 카테고리명 / tags: 속성 태그 배열 / place_name: 특정 장소명)
+  태그 예시: ["야경", "포토스팟", "힐링", "바다", "숲", "조용한", "실내", "체험"]
 - remove: 기존 장소 제거
 - replace: 장소 교체
 - reorder: 특정 장소 하나를 특정 번호 위치로 이동 (new_order 필드 사용, 반드시 현재 일정에서 정확한 위치 번호 지정)
 - swap_places: 같은 일차 내 두 장소의 위치를 서로 교환 (place_a, place_b 필드 사용)
 - swap_days: 두 일차의 모든 장소를 통째로 교환 (day_a, day_b 필드 사용)
-- modify: 체류시간/시작시간/메모 수정 (arrival_time: "HH:MM", stay_duration: 분 단위)
+- modify: 특정 장소 하나의 체류시간/시작시간/메모 수정 (arrival_time: "HH:MM", stay_duration: 분 단위)
+- bulk_modify: 하루 전체 또는 카테고리 단위 일괄 수정
+  (day_number: 일차 또는 null=전체 / category: 카테고리 필터 또는 null /
+   stay_duration: 고정값(분) / stay_duration_delta: 증감값(분, 음수=축소) /
+   start_time_shift: 시작 시간 이동(분, 음수=앞당김))
 - regenerate: 일정 전체 또는 특정 일차를 조건에 맞게 새로 생성
   (scope: "full"=전체재생성, 숫자=특정일차 / themes: 테마 배열 / requirements: 사용자 요구사항 자유형 문자열)
 - change_duration: 여행 전체 기간(일수) 변경 — 늘리거나 줄이기
@@ -59,14 +64,16 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 
 ## 언제 어떤 액션을 쓸지 판단 기준
 - 특정 장소 하나를 추가/제거/교체/시간수정 → add/remove/replace/modify
+- "야경 있는 곳", "포토스팟", "조용한 곳", "실내 명소" 등 분위기·속성 기반 추가 → add (tags 필드 사용)
 - "A랑 B 자리 바꿔줘", "A와 B 순서 교환" 등 두 장소를 서로 맞교환 → swap_places (place_a, place_b에 각각 장소명)
 - "A를 첫 번째로", "B를 3번째로" 등 특정 장소를 특정 위치로 이동 → reorder (new_order에 반드시 정확한 위치 번호)
 - "N일차랑 M일차 바꿔줘" 등 일차 전체 교환 → swap_days
 - "X 테마로 바꿔줘", "전체 다시 짜줘", "힐링/쇼핑/야경 위주로" 등 대규모 재구성 → regenerate
 - "하루 더", "이틀 줄여", "3박4일로 바꿔" 등 기간 자체 변경 → change_duration
 - "동선 최적화해줘", "이동거리 줄여줘" → optimize_route
-- "힘들다", "빡세다", "너무 많아" 등 피로·부담 호소 → remove(덜 중요한 장소) + modify(체류시간 축소) 복합 사용
+- "힘들다", "빡세다", "너무 많아" 등 피로·부담 호소 → bulk_modify(stay_duration_delta=-20) + remove(덜 중요한 장소) 복합 사용
 - "간소화", "단순하게", "줄여줘" → 덜 중요한 장소 remove 여러 개
+- "체류시간 다 늘려줘/줄여줘", "1일차 전체 30분 앞당겨줘", "맛집 체류시간 1시간으로" → bulk_modify
 - "~시부터 시작", "~시 이후로" → 첫 장소에 modify(arrival_time) 적용하면 이후 모든 장소 시간이 자동 연쇄 조정됨
 - 요청이 포괄적이어서 선택지가 여러 개인 경우 → needs_confirmation: true 설정
 
@@ -155,7 +162,25 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": 1}], "response_message": "여행을 하루 늘려서 새 일차 일정을 만들게요!", "needs_confirmation": false}
 
 사용자: "이틀 줄여줘"
-응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": -2}], "response_message": "여행을 이틀 줄이고 마지막 두 일차 일정을 삭제할게요!", "needs_confirmation": false}"""
+응답: {"action_type": "change_duration", "changes": [{"action": "change_duration", "delta_days": -2}], "response_message": "여행을 이틀 줄이고 마지막 두 일차 일정을 삭제할게요!", "needs_confirmation": false}
+
+사용자: "야경 볼 수 있는 곳 추가해줘"
+응답: {"action_type": "add", "changes": [{"action": "add", "tags": ["야경", "뷰맛집"], "day_number": null}], "response_message": "야경 명소를 일정에 추가할게요!", "needs_confirmation": false}
+
+사용자: "포토스팟 하나 넣어줘"
+응답: {"action_type": "add", "changes": [{"action": "add", "tags": ["사진명소", "포토스팟", "전망"]}], "response_message": "사진 찍기 좋은 명소를 추가할게요!", "needs_confirmation": false}
+
+사용자: "체류시간 다 30분씩 줄여줘"
+응답: {"action_type": "bulk_modify", "changes": [{"action": "bulk_modify", "stay_duration_delta": -30}], "response_message": "전체 일정의 체류시간을 30분씩 줄였어요!", "needs_confirmation": false}
+
+사용자: "1일차 전체 1시간 앞당겨줘"
+응답: {"action_type": "bulk_modify", "changes": [{"action": "bulk_modify", "day_number": 1, "start_time_shift": -60}], "response_message": "1일차 일정을 1시간 앞당겼어요!", "needs_confirmation": false}
+
+사용자: "맛집 체류시간 다 1시간으로 맞춰줘"
+응답: {"action_type": "bulk_modify", "changes": [{"action": "bulk_modify", "category": "맛집", "stay_duration": 60}], "response_message": "식당 체류시간을 모두 1시간으로 조정했어요!", "needs_confirmation": false}
+
+사용자: "일정이 너무 빡빡해"
+응답: {"action_type": "compound", "changes": [{"action": "bulk_modify", "stay_duration_delta": -15}, {"action": "remove", "place_name": "덜 중요한 장소명"}], "response_message": "전체 체류시간을 15분씩 줄이고 장소 하나를 뺐어요. 좀 여유로워졌을 거예요!", "needs_confirmation": false}"""
 
     def __init__(self):
         config = get_config()
@@ -282,12 +307,20 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             # 교체 실패(중복) 경고 메시지 추가
             if warnings:
                 response_message = " ".join(warnings)
+            # 영업시간 충돌 등 add 경고 메시지 후치
+            add_warnings = [
+                c["warning"] for c in (changes_made or [])
+                if isinstance(c, dict) and c.get("warning")
+            ]
+            if add_warnings:
+                response_message += " (⚠️ " + " / ".join(add_warnings) + ")"
 
-        # 8. 세션 업데이트
+        # 8. 세션 업데이트 (실제 변경 결과도 함께 저장해서 GPT가 다음 대화에서 참조 가능)
         await self._update_session(
             db, session,
             request.message,
-            response_message
+            response_message,
+            changes_made=changes_made
         )
 
         return ChatResponse(
@@ -358,18 +391,29 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         db: AsyncSession,
         session: ChatSession,
         user_message: str,
-        assistant_response: str
+        assistant_response: str,
+        changes_made: Optional[list] = None
     ):
-        """세션 히스토리 업데이트"""
+        """세션 히스토리 업데이트.
+        changes_made가 있으면 assistant 메시지에 실제 변경 결과를 덧붙여
+        GPT가 다음 대화에서 실제로 무엇이 바뀌었는지 참조할 수 있게 한다.
+        """
+        import json as _json
         from sqlalchemy.orm.attributes import flag_modified
 
         messages = session.messages or []
         messages.append({"role": "user", "content": user_message})
-        messages.append({"role": "assistant", "content": assistant_response})
+
+        if changes_made:
+            result_summary = _json.dumps(changes_made, ensure_ascii=False)
+            full_response = f"{assistant_response}\n[변경결과: {result_summary}]"
+        else:
+            full_response = assistant_response
+
+        messages.append({"role": "assistant", "content": full_response})
 
         # 최근 CHAT_STORAGE_LIMIT개만 유지
         session.messages = messages[-CHAT_STORAGE_LIMIT:]
-        # JSON 컬럼(list)의 내부 변경을 SQLAlchemy가 감지하도록 명시적으로 표시
         flag_modified(session, "messages")
         await db.commit()
 
@@ -523,14 +567,17 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             return []
 
     def _format_available_places(self, places: List[Place]) -> str:
-        """추가 가능한 장소 포맷팅 (최대 30개 GPT 전달 → 토큰 절약)"""
+        """추가 가능한 장소 포맷팅 (최대 30개 GPT 전달)
+        태그를 5개까지 노출해 GPT가 분위기/속성 기반 선택 가능하도록 함.
+        """
         if not places:
             return "추가 가능한 장소가 없습니다."
 
         lines = []
         for p in places[:30]:
-            tags = ', '.join(p.tags[:2]) if p.tags else ''
-            lines.append(f"- {p.name} ({p.category}) [ID: {p.id}] {tags}")
+            tags = ', '.join(p.tags[:5]) if p.tags else ''
+            tag_part = f" [{tags}]" if tags else ""
+            lines.append(f"- {p.name} ({p.category}) [ID: {p.id}]{tag_part}")
 
         return '\n'.join(lines)
 
@@ -761,6 +808,91 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 
         return best_match
 
+    def _get_day_centroid(self, itineraries: list, day_number: int) -> Optional[tuple]:
+        """특정 일차 장소들의 평균 좌표(centroid) 반환. 좌표 없는 장소는 제외."""
+        day_its = [
+            it for it in itineraries
+            if it.day_number == day_number
+            and it.place and it.place.latitude and it.place.longitude
+        ]
+        if not day_its:
+            return None
+        avg_lat = sum(it.place.latitude for it in day_its) / len(day_its)
+        avg_lng = sum(it.place.longitude for it in day_its) / len(day_its)
+        return avg_lat, avg_lng
+
+    def _find_closest_day(self, itineraries: list, lat: float, lng: float, total_days: int) -> Optional[int]:
+        """새 장소 좌표에서 centroid가 가장 가까운 일차 반환. 모든 일차가 비어있으면 None."""
+        from Planner.route_optimizer import get_route_optimizer
+        optimizer = get_route_optimizer()
+
+        best_day = None
+        best_dist = float('inf')
+
+        for day in range(1, total_days + 1):
+            centroid = self._get_day_centroid(itineraries, day)
+            if centroid is None:
+                continue
+            dist = optimizer._haversine(lat, lng, centroid[0], centroid[1])
+            if dist < best_dist:
+                best_dist = dist
+                best_day = day
+
+        return best_day
+
+    def _check_route_distance(
+        self, itineraries: list, day_number: int,
+        lat: float, lng: float, threshold_km: float = 15.0
+    ) -> Optional[str]:
+        """새 장소가 특정 일차 동선 중심에서 threshold_km 이상 멀면 경고 문자열 반환."""
+        from Planner.route_optimizer import get_route_optimizer
+        optimizer = get_route_optimizer()
+
+        centroid = self._get_day_centroid(itineraries, day_number)
+        if centroid is None:
+            return None
+
+        dist = optimizer._haversine(lat, lng, centroid[0], centroid[1])
+        if dist > threshold_km:
+            return (
+                f"{day_number}일차 동선 중심에서 약 {dist:.0f}km 떨어진 장소입니다. "
+                "이동 시간이 길어질 수 있습니다."
+            )
+        return None
+
+    def _check_operating_hours_conflict(self, place, ordered_itineraries: list) -> Optional[str]:
+        """추가된 장소의 도착 예정 시간과 영업시간을 대조해 충돌 경고 문자열 반환.
+        time_constraint의 파서를 재사용하고, 충돌이 없으면 None 반환.
+        """
+        if not place.operating_hours:
+            return None
+
+        try:
+            from Planner.time_constraint import TimeConstraintService
+
+            tc = TimeConstraintService()
+            open_t, close_t = tc._parse_operating_hours(place.operating_hours)
+            if open_t is None:
+                return None
+
+            # 추가된 장소의 예정 도착 시간 찾기
+            arrival = next(
+                (it.arrival_time for it in ordered_itineraries if it.place_id == place.id),
+                None
+            )
+            if arrival is None:
+                return None
+
+            if arrival < open_t or arrival >= close_t:
+                return (
+                    f"{place.name}의 영업시간({open_t.strftime('%H:%M')}~"
+                    f"{close_t.strftime('%H:%M')})과 예정 도착 시간({arrival.strftime('%H:%M')})이 맞지 않습니다."
+                )
+        except Exception:
+            pass
+
+        return None
+
     def _find_itinerary_by_name(
         self,
         name: str,
@@ -876,6 +1008,11 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                     if result:
                         applied_changes.append(result)
 
+                elif action == "bulk_modify":
+                    result = await self._apply_bulk_modify(db, trip, change)
+                    if result:
+                        applied_changes.append(result)
+
             except Exception as e:
                 logger.error(f"변경 사항 적용 실패 ({action}): {e}")
 
@@ -922,7 +1059,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         "관광지":    9 * 60,       # 09:00 오전 관광
         "문화시설":  10 * 60,      # 10:00 오전 문화
         "카페":      10 * 60,      # 10:00 or 오후 브런치
-        "음식점":    12 * 60,      # 12:00 점심 기본
+        "맛집":      12 * 60,      # 12:00 점심 기본 (DB 카테고리명)
         "쇼핑":      14 * 60,      # 14:00 오후 쇼핑
         "레저/스포츠": 10 * 60,
         "숙박":      21 * 60,      # 21:00 저녁 체크인
@@ -966,18 +1103,37 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                     place = p
                     break
 
+        # 태그 기반 검색 (카테고리로도 못 찾은 경우)
+        # GPT가 "야경", "포토스팟", "힐링" 등 속성 기반으로 요청할 때 사용
+        if not place and change.get("tags"):
+            from Vision.tag_matcher import calculate_tag_score
+            query_tags = change["tags"]
+            best_score = 0.0
+            for p in available_places:
+                if p.id in existing_ids or not p.tags:
+                    continue
+                score = calculate_tag_score(p.tags, query_tags)
+                if score > best_score:
+                    best_score = score
+                    place = p
+
         if not place:
             return None
 
         if place.id in existing_ids:
             return None
 
-        # day_number 미지정 시 → 장소 수가 가장 적은 날에 자동 배치
+        # day_number 미지정 시 → 동선 중심에 가장 가까운 날 우선, 없으면 장소 수 최소인 날
         day = change.get("day_number")
+        total_days = (trip.end_date - trip.start_date).days + 1
         if not day:
-            day_counts = Counter(it.day_number for it in trip.itineraries)
-            total_days = (trip.end_date - trip.start_date).days + 1
-            day = min(range(1, total_days + 1), key=lambda d: day_counts.get(d, 0))
+            if place.latitude and place.longitude:
+                day = self._find_closest_day(
+                    trip.itineraries, place.latitude, place.longitude, total_days
+                )
+            if not day:
+                day_counts = Counter(it.day_number for it in trip.itineraries)
+                day = min(range(1, total_days + 1), key=lambda d: day_counts.get(d, 0))
 
         # 해당 일차 기존 일정 조회 (arrival_time + place 포함)
         from sqlalchemy.orm import selectinload as _selectinload
@@ -1046,7 +1202,22 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         fresh_ordered = list(result3.scalars().all())
         await self._recalculate_day_times(db, fresh_ordered, start_hour=start_h, start_minute=start_m)
 
-        return {"action": "add", "place_name": place.name, "day_number": day}
+        # 동선 거리 경고 + 영업시간 충돌 경고
+        warnings = []
+        if place.latitude and place.longitude:
+            dist_warn = self._check_route_distance(
+                trip.itineraries, day, place.latitude, place.longitude
+            )
+            if dist_warn:
+                warnings.append(dist_warn)
+        hours_warn = self._check_operating_hours_conflict(place, fresh_ordered)
+        if hours_warn:
+            warnings.append(hours_warn)
+
+        result_info = {"action": "add", "place_name": place.name, "day_number": day}
+        if warnings:
+            result_info["warning"] = " / ".join(warnings)
+        return result_info
 
     async def _apply_remove(self, db, trip, change, available_places: list = None) -> Optional[dict]:
         """장소 제거 후 같은 일차 order_index 재정렬 + 빈 자리 자동 보충"""
@@ -1298,11 +1469,19 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 db, old_it.id,
                 ItineraryUpdate(place_id=new_place.id)
             )
-            return {
-                "action": "replace",
-                "old_place": old_it.place.name,
-                "new_place": new_place.name
-            }
+
+            # 교체된 장소가 그날 동선에서 너무 멀면 경고
+            dist_warn = None
+            if new_place.latitude and new_place.longitude:
+                dist_warn = self._check_route_distance(
+                    itineraries_snapshot, old_it.day_number,
+                    new_place.latitude, new_place.longitude
+                )
+
+            result = {"action": "replace", "old_place": old_it.place.name, "new_place": new_place.name}
+            if dist_warn:
+                result["warning"] = dist_warn
+            return result
         return None
 
     async def _apply_reorder(self, db, trip, change, available_places: list = None) -> Optional[dict]:
@@ -1431,7 +1610,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         arrival_time 없으면 카테고리 기반 추정 시간 사용.
         """
         CATEGORY_DEFAULT_HOUR = {
-            "음식점": 12,   # 점심대
+            "맛집": 12,     # 점심대 (DB 카테고리명)
             "카페": 10,
             "문화시설": 10,
             "관광지": 9,
@@ -1458,42 +1637,114 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 return i
         return len(others)  # 모든 장소보다 늦으면 마지막
 
-    async def _recalculate_day_times(self, db, ordered_itineraries: list, start_hour: int = 9, start_minute: int = 0):
+    async def _recalculate_day_times(
+        self,
+        db,
+        ordered_itineraries: list,
+        start_hour: int = 9,
+        start_minute: int = 0,
+        pace_buffer: int = 15,
+    ):
         """순서 변경 후 arrival_time을 체인 방식으로 재계산.
-        ordered_itineraries: 이미 order_index 순으로 정렬된 당일 일정 리스트
+
+        초기 생성과 동일한 시간 제약을 적용:
+        - 카카오 API 실제 이동 시간
+        - 페이스 기반 버퍼 (기본 moderate=15분)
+        - 식사 시간대 snapping (11:30 전→11:30, 14:00~17:30 사이→17:30)
+        - 야경 장소 20:00 이전이면 push
         """
         from datetime import time as time_type
         from Trip.dto import ItineraryUpdate
+        from services.kakao_service import get_route_info
+        from Planner.constants import LUNCH_START, LUNCH_END, EARLY_DINNER_START, NIGHT_START
 
         if not ordered_itineraries:
             return
 
-        # commit 후 SQLAlchemy가 ORM 객체 속성을 expire 처리하므로
-        # 첫 commit 이전에 필요한 값을 모두 추출해 둔다 (MissingGreenlet 방지)
+        MEAL_CATS = {'맛집', '식당'}
+        NIGHT_KEYWORDS = {"야경", "야간", "night", "루프탑", "야시장", "불꽃", "일몰", "노을", "선셋"}
+        NON_NIGHT_CATS = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
+
+        # commit 후 SQLAlchemy expire 방지: 필요한 값 미리 추출
         it_ids = [it.id for it in ordered_itineraries]
         stays = [it.stay_duration or 60 for it in ordered_itineraries]
-        travel_times = [0] + [
-            (ordered_itineraries[i].travel_time_from_prev or 15)
-            for i in range(1, len(ordered_itineraries))
-        ]
+
+        categories = []
+        is_night_flags = []
+        for it in ordered_itineraries:
+            place = getattr(it, 'place', None)
+            cat = (place.category if place else None) or ""
+            categories.append(cat)
+            tags = (place.tags if place else None) or []
+            name = (place.name if place else "") or ""
+            is_night = (
+                cat not in NON_NIGHT_CATS and (
+                    any(kw in t.lower() for t in tags for kw in NIGHT_KEYWORDS) or
+                    any(kw in name for kw in NIGHT_KEYWORDS)
+                )
+            )
+            is_night_flags.append(is_night)
+
+        # 카카오 API로 이동 시간 재계산
+        travel_times = [0]
+        for i in range(1, len(ordered_itineraries)):
+            prev = ordered_itineraries[i - 1]
+            curr = ordered_itineraries[i]
+            prev_place = getattr(prev, 'place', None)
+            curr_place = getattr(curr, 'place', None)
+
+            travel_time = 15
+            if (prev_place and curr_place
+                    and prev_place.latitude and prev_place.longitude
+                    and curr_place.latitude and curr_place.longitude):
+                try:
+                    route_info = await get_route_info(
+                        prev_place.longitude, prev_place.latitude,
+                        curr_place.longitude, curr_place.latitude
+                    )
+                    duration = route_info.get('duration', 0)
+                    if duration > 0:
+                        travel_time = max(int(duration / 60), 5)
+                except Exception:
+                    travel_time = getattr(prev, 'travel_time_from_prev', None) or 15
+            travel_times.append(travel_time)
+
+        LUNCH_S = LUNCH_START.hour * 60 + LUNCH_START.minute        # 690 (11:30)
+        LUNCH_E = LUNCH_END.hour * 60 + LUNCH_END.minute            # 840 (14:00)
+        EARLY_D = EARLY_DINNER_START.hour * 60 + EARLY_DINNER_START.minute  # 1050 (17:30)
+        NIGHT_M = NIGHT_START.hour * 60 + NIGHT_START.minute        # 1200 (20:00)
 
         current_minutes = start_hour * 60 + start_minute
 
         for i, it_id in enumerate(it_ids):
-            h, m = divmod(current_minutes, 60)
+            arrival_minutes = current_minutes + travel_times[i]
+
+            # 식사 시간대 보정
+            if categories[i] in MEAL_CATS:
+                if arrival_minutes < LUNCH_S:
+                    arrival_minutes = LUNCH_S
+                elif LUNCH_E <= arrival_minutes < EARLY_D:
+                    arrival_minutes = EARLY_D
+
+            # 야경 장소: 20:00 이전이면 push
+            if is_night_flags[i] and arrival_minutes < NIGHT_M:
+                arrival_minutes = NIGHT_M
+
+            h, m = divmod(arrival_minutes, 60)
             if h >= 24:
                 h, m = 23, 59
             new_arrival = time_type(h, m)
 
+            update_fields = {"arrival_time": new_arrival}
+            if i > 0:
+                update_fields["travel_time_from_prev"] = travel_times[i]
+
             await trip_crud.update_itinerary(
                 db, it_id,
-                ItineraryUpdate(arrival_time=new_arrival)
+                ItineraryUpdate(**update_fields)
             )
 
-            # 다음 장소 도착 시간 = 현재 도착 + 체류 시간 + 다음 장소까지 이동 시간
-            stay = stays[i]
-            travel = travel_times[i + 1] if i + 1 < len(it_ids) else 0
-            current_minutes += stay + travel
+            current_minutes = arrival_minutes + stays[i] + pace_buffer
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
         """시간/메모 수정"""
@@ -1524,7 +1775,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 ItineraryUpdate(**update_data)
             )
 
-            # arrival_time 또는 stay_duration 변경 시 당일 전체 시간 연쇄 재계산
+            # arrival_time 또는 stay_duration 변경 시 당일 시간 연쇄 재계산
             if "arrival_time" in update_data or "stay_duration" in update_data:
                 result = await db.execute(
                     sa_select(ItineraryModel)
@@ -1533,10 +1784,23 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 )
                 day_its = list(result.scalars().all())
                 if day_its:
-                    first_time = day_its[0].arrival_time
-                    start_h = first_time.hour if first_time else 9
-                    start_m = first_time.minute if first_time else 0
-                    await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
+                    target_idx = next(
+                        (i for i, it in enumerate(day_its) if it.id == target.id), 0
+                    )
+                    # arrival_time을 중간 장소에 변경한 경우: 해당 위치부터만 재계산
+                    # (첫 번째 장소부터 재계산하면 지정한 시간이 덮어씌워짐)
+                    if "arrival_time" in update_data and target_idx > 0:
+                        sub_list = day_its[target_idx:]
+                        anchor_time = day_its[target_idx].arrival_time
+                        start_h = anchor_time.hour if anchor_time else 9
+                        start_m = anchor_time.minute if anchor_time else 0
+                        await self._recalculate_day_times(db, sub_list, start_hour=start_h, start_minute=start_m)
+                    else:
+                        # 첫 번째 장소 시간 변경이거나 stay_duration만 변경: 전체 재계산
+                        first_time = day_its[0].arrival_time
+                        start_h = first_time.hour if first_time else 9
+                        start_m = first_time.minute if first_time else 0
+                        await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
 
             return {"action": "modify", "place_name": target.place.name, **update_data}
         return None
@@ -1820,7 +2084,10 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 key=lambda x: x.order_index
             )
             if day_its:
-                await self._recalculate_day_times(db, day_its)
+                first_time = day_its[0].arrival_time
+                sh = first_time.hour if first_time else 9
+                sm = first_time.minute if first_time else 0
+                await self._recalculate_day_times(db, day_its, start_hour=sh, start_minute=sm)
 
         return {"action": "swap_days", "day_a": day_a, "day_b": day_b}
 
@@ -1953,6 +2220,103 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 "added_days": added_days,
             }
 
+    async def _apply_bulk_modify(self, db, trip, change) -> Optional[dict]:
+        """일괄 수정 — 하루 전체 또는 카테고리 단위로 stay_duration/arrival_time 변경
+
+        change 필드:
+          day_number: int|null — 대상 일차 (null이면 전체 일정)
+          category: str|null — 대상 카테고리 필터 (null이면 전체)
+          stay_duration: int|null — 고정 체류시간(분)으로 덮어쓰기
+          stay_duration_delta: int|null — 현재 체류시간에 더할 분수 (음수=축소)
+          start_time_shift: int|null — 첫 장소 도착 시간을 N분 앞당기거나 뒤로 밀기
+        """
+        from Trip.dto import ItineraryUpdate
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.orm import selectinload as _selectinload
+        from core.models import Itinerary as ItineraryModel
+
+        target_day = change.get("day_number")
+        target_cat = change.get("category")
+        stay_fixed = change.get("stay_duration")
+        stay_delta = change.get("stay_duration_delta")
+        time_shift = change.get("start_time_shift")  # 분 단위
+
+        # 대상 일정 수집
+        query = (
+            sa_select(ItineraryModel)
+            .options(_selectinload(ItineraryModel.place))
+            .where(ItineraryModel.trip_id == trip.id)
+            .order_by(ItineraryModel.day_number, ItineraryModel.order_index, ItineraryModel.id)
+        )
+        if target_day:
+            query = query.where(ItineraryModel.day_number == target_day)
+        result = await db.execute(query)
+        all_its = list(result.scalars().all())
+
+        if not all_its:
+            return None
+
+        # 카테고리 필터
+        targets = all_its
+        if target_cat:
+            targets = [it for it in all_its if it.place and target_cat in (it.place.category or "")]
+
+        modified_count = 0
+
+        # stay_duration 변경
+        for it in targets:
+            update_fields = {}
+            if stay_fixed is not None:
+                update_fields["stay_duration"] = max(10, min(stay_fixed, 480))
+            elif stay_delta is not None:
+                current = it.stay_duration or 60
+                update_fields["stay_duration"] = max(10, min(current + stay_delta, 480))
+            if update_fields:
+                await trip_crud.update_itinerary(db, it.id, ItineraryUpdate(**update_fields))
+                modified_count += 1
+
+        # start_time_shift: 영향받는 일차들의 첫 장소 시간을 이동 후 연쇄 재계산
+        if time_shift is not None:
+            affected_days = {it.day_number for it in (targets if targets else all_its)}
+            for day in affected_days:
+                day_its_result = await db.execute(
+                    sa_select(ItineraryModel)
+                    .options(_selectinload(ItineraryModel.place))
+                    .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+                    .order_by(ItineraryModel.order_index, ItineraryModel.id)
+                )
+                day_its = list(day_its_result.scalars().all())
+                if not day_its:
+                    continue
+                first_time = day_its[0].arrival_time
+                base_min = (first_time.hour * 60 + first_time.minute) if first_time else 9 * 60
+                new_min = max(0, min(base_min + time_shift, 23 * 60))
+                new_h, new_m = divmod(new_min, 60)
+                await self._recalculate_day_times(db, day_its, start_hour=new_h, start_minute=new_m)
+        elif stay_fixed is not None or stay_delta is not None:
+            # stay_duration만 변경된 경우에도 연쇄 시간 재계산
+            affected_days = {it.day_number for it in targets}
+            for day in affected_days:
+                day_its_result = await db.execute(
+                    sa_select(ItineraryModel)
+                    .options(_selectinload(ItineraryModel.place))
+                    .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+                    .order_by(ItineraryModel.order_index, ItineraryModel.id)
+                )
+                day_its = list(day_its_result.scalars().all())
+                if day_its:
+                    first_time = day_its[0].arrival_time
+                    start_h = first_time.hour if first_time else 9
+                    start_m = first_time.minute if first_time else 0
+                    await self._recalculate_day_times(db, day_its, start_hour=start_h, start_minute=start_m)
+
+        return {
+            "action": "bulk_modify",
+            "modified_count": modified_count,
+            "day_number": target_day,
+            "category": target_cat,
+        }
+
     async def _apply_optimize_route(
         self,
         db: AsyncSession,
@@ -1995,6 +2359,37 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 )
 
         await trip_crud.reorder_itineraries(db, trip.id, reorder_items)
+
+        # 순서 변경 후 각 일차 arrival_time 재계산
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.orm import selectinload as _selectinload
+        from core.models import Itinerary as ItineraryModel
+
+        from Recommend.preference_service import get_user_preference
+        preference = await get_user_preference(db, user_id)
+        pace_buffer = 15
+        if preference and preference.travel_pace:
+            pace_map = {"relaxed": 20, "moderate": 15, "packed": 10}
+            pace_buffer = pace_map.get(preference.travel_pace, 15)
+
+        all_days = sorted({item.day_number for item in reorder_items})
+        for day in all_days:
+            result = await db.execute(
+                sa_select(ItineraryModel)
+                .options(_selectinload(ItineraryModel.place))
+                .where(ItineraryModel.trip_id == trip.id, ItineraryModel.day_number == day)
+                .order_by(ItineraryModel.order_index, ItineraryModel.id)
+            )
+            day_its = list(result.scalars().all())
+            if day_its:
+                first_time = day_its[0].arrival_time
+                start_h = first_time.hour if first_time else 9
+                start_m = first_time.minute if first_time else 0
+                await self._recalculate_day_times(
+                    db, day_its, start_hour=start_h, start_minute=start_m,
+                    pace_buffer=pace_buffer
+                )
+
         return {"action": "optimize_route"}
 
     async def get_chat_history(

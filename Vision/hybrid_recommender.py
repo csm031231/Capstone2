@@ -48,7 +48,7 @@ class HybridRecommender:
     """
 
     # 동적 임계값 배율 (Top-K 평균 대비)
-    HIGH_RATIO = 1.4    # 평균의 1.4배 이상 → 높음 (CLIP만으로 충분)
+    HIGH_RATIO = 1.3    # 평균의 1.3배 이상 → 높음 (CLIP만으로 충분)
     LOW_RATIO = 0.9     # 평균의 0.9배 이하 → 낮음 (태그 Fallback)
 
     # Fallback 고정값 (데이터 적을 때 사용)
@@ -153,7 +153,7 @@ class HybridRecommender:
         clip_results = self.faiss_index.search(
             query_vector,
             top_k=top_k * 2,  # 여유있게 검색
-            min_similarity=0.0  # 일단 다 가져옴
+            min_similarity=0.20  # 노이즈 제거 (CLIP 랜덤 쌍 기준선 ~0.25)
         )
 
         # 3. 검색 결과가 없으면 태그 Fallback
@@ -183,6 +183,11 @@ class HybridRecommender:
             # 태그 없으면 CLIP만으로 처리
             return self._build_results(clip_results[:top_k], method="clip")
 
+    @staticmethod
+    def _normalize_clip_score(clip_score: float) -> float:
+        """CLIP 점수를 [0,1] 스케일로 정규화 (ViT-B/32 기준 0.20~0.60 구간)"""
+        return max(0.0, min(1.0, (clip_score - 0.20) / 0.40))
+
     def _hybrid_blend(
         self,
         clip_results: List[Tuple[Dict, float]],
@@ -195,12 +200,13 @@ class HybridRecommender:
         tag_results = match_tags_with_places(tags, places)
         tag_scores = {p["place_id"]: score for p, score in tag_results}
 
-        # 합산
+        # 합산 (CLIP 점수 정규화 후 가중치 적용)
         results = []
         for place, clip_score in clip_results:
             tag_score = tag_scores.get(place["place_id"], 0)
+            norm_clip = self._normalize_clip_score(clip_score)
             final_score = (
-                clip_score * self.CLIP_WEIGHT +
+                norm_clip * self.CLIP_WEIGHT +
                 tag_score * self.TAG_WEIGHT
             )
 
@@ -242,7 +248,8 @@ class HybridRecommender:
         results = []
         for place, clip_score in clip_results:
             tag_score = tag_scores.get(place["place_id"], 0)
-            final_score = clip_score * clip_weight + tag_score * tag_weight
+            norm_clip = self._normalize_clip_score(clip_score)
+            final_score = norm_clip * clip_weight + tag_score * tag_weight
 
             results.append(RecommendationResult(
                 place_id=place["place_id"],

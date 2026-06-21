@@ -3,7 +3,7 @@ import re
 import logging
 import asyncio
 from typing import List, Optional, Dict
-from datetime import time
+from datetime import time, timedelta
 from openai import OpenAI
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,14 +15,12 @@ from Trip import crud as trip_crud
 from Recommend.dto import RecommendCondition
 from Recommend.recommend_service import get_condition_recommender
 from Recommend.preference_service import (
-    get_user_preference,
     preference_to_snapshot,
-    get_travel_pace_config
 )
 from Planner.dto import GenerateRequest, GenerateResponse, GeneratedItinerary, DaySummary
 from Planner.route_optimizer import get_route_optimizer
 from Planner.time_constraint import get_time_constraint_service
-from Planner.constants import REGION_PREFIX, GPT_PLANNER_MAX_TOKENS
+from Planner.constants import REGION_PREFIX, DEFAULT_DAY_START, DEFAULT_DAY_END, WEEKDAY_KR
 
 logger = logging.getLogger(__name__)
 
@@ -59,69 +57,40 @@ class PlannerService:
         total_days = (request.end_date - request.start_date).days + 1
 
         # 2단계: 후보 장소 수집
-        print("[PLANNER] 2단계: 후보 장소 수집 시작")
-        candidates = await self._gather_candidates(
-            db, request, user_preference, total_days
-        )
-
+        candidates = await self._gather_candidates(db, request, user_preference, total_days)
         if not candidates:
             raise ValueError(f"'{request.region}' 지역에서 조건에 맞는 여행지를 찾을 수 없습니다. 테마나 지역을 변경해 주세요.")
-        print(f"[PLANNER] 2단계 완료: {len(candidates)}개 후보 장소")
+        logger.info(f"후보 장소 {len(candidates)}개 수집 완료")
 
         # 3단계: GPT 일정 초안 생성
-        print("[PLANNER] 3단계: GPT 일정 생성 시작")
-        draft = await self._generate_with_gpt(
-            candidates, request, user_preference, total_days
-        )
-        print(f"[PLANNER] 3단계 완료: {len(draft.get('days', []))}일 일정 생성")
+        draft = await self._generate_with_gpt(candidates, request, user_preference, total_days)
+        logger.info(f"GPT 초안 생성 완료: {len(draft.get('days', []))}일")
 
-        # 4단계: 장소 딕셔너리로 변환
-        print("[PLANNER] 4단계: 장소 매핑 시작")
+        # 4단계: 장소 매핑 및 후처리
         place_dict = {c['place_id']: c for c in candidates}
         places_by_day = self._build_places_by_day(draft, place_dict)
-        print(f"[PLANNER] 4단계 완료: {sum(len(v) for v in places_by_day.values())}개 장소 매핑")
+        logger.info(f"장소 매핑 완료: {sum(len(v) for v in places_by_day.values())}개")
 
-        # 4.5단계: must_visit 강제 삽입 (GPT가 누락한 경우 보완)
         if request.must_visit_places:
             self._enforce_must_visit(places_by_day, request.must_visit_places, place_dict, total_days)
 
-        # 4.7단계: 식당 근접성 최적화 (동떨어진 식당 → 동선상 가까운 식당으로 교체)
-        print("[PLANNER] 4.7단계: 식당 근접성 최적화 시작")
         places_by_day = self._optimize_restaurant_proximity(places_by_day, candidates)
-        print("[PLANNER] 4.7단계 완료")
 
-        # 5단계: 구조 분리 (식사/야경 위치 확정)
-        print("[PLANNER] 5단계: 구조 분리 시작")
+        # 5단계: 구조 분리 → 6단계: TSP 최적화 → 7단계: 시간 제약 적용
         segmented, structural_warnings = self.time_service.structural_split_all(places_by_day)
-        print("[PLANNER] 5단계 완료")
-
-        # 6단계: 세그먼트 내 TSP 최적화 (아침/오후 구간만)
-        print("[PLANNER] 6단계: 세그먼트 내 동선 최적화 시작")
         segmented = await self.route_optimizer.optimize_segments(segmented)
-        print("[PLANNER] 6단계 완료")
-
-        # 7단계: 시간 제약 적용 (도착 시간 계산 + Kakao travel_time)
-        print("[PLANNER] 7단계: 시간 제약 적용 시작")
         constrained, time_warnings = await self.time_service.apply_time_calculations(
-            segmented,
-            user_preference,
-            request.start_date
+            segmented, user_preference, request.start_date
         )
         warnings = structural_warnings + time_warnings
-        print("[PLANNER] 7단계 완료")
 
         # 8단계: DB 저장
-        print("[PLANNER] 8단계: DB 저장 시작")
         trip = await self._save_trip(
             db, user_id, request, constrained, user_preference, photo_url=photo_url, draft=draft
         )
-        print(f"[PLANNER] 8단계 완료: trip_id={trip.id}")
+        logger.info(f"일정 저장 완료: trip_id={trip.id}")
 
-        # 9단계: 응답 생성
-        print("[PLANNER] 9단계: 응답 생성")
-        return self._build_response(
-            trip, constrained, draft, request, total_days, warnings
-        )
+        return self._build_response(trip, constrained, draft, request, total_days, warnings)
 
     async def _gather_candidates(
         self,
@@ -131,15 +100,6 @@ class PlannerService:
         total_days: int
     ) -> List[dict]:
         """후보 장소 수집"""
-# 필요 장소 수 계산
-    # 과거에는 request.max_places_per_day * total_days * 2 로 계산했는데,
-    # 사용자가 하루 값을 높이면 RecommendCondition.top_k(기존 상한 50)를
-    # 넘겨버리는 일이 있었습니다. 이로 인해 요청이 검증에 실패하여
-    # `Input should be less than or equal to 50` 오류가 났습니다.
-    #
-    # 이후 RecommendCondition의 제한을 100으로 확장하고, 계산도
-    # 하드코딩된 12(기본 max_places_per_day) 기준으로 변경해 두었습니다.
-    # 최종적으로 min(needed, 100)으로 클램프하여 버그를 방지합니다.
         needed = 12 * total_days * 2
 
         # 테마 결정
@@ -294,11 +254,36 @@ class PlannerService:
             if user_requirements else ""
         )
 
+        # 시작/종료 시간
+        start_time = (
+            preference.preferred_start_time
+            if preference and preference.preferred_start_time
+            else DEFAULT_DAY_START
+        )
+        end_time = (
+            preference.preferred_end_time
+            if preference and preference.preferred_end_time
+            else DEFAULT_DAY_END
+        )
+        start_h = start_time.strftime("%H:%M")
+        end_h = end_time.strftime("%H:%M")
+
+        # 요일 정보
+        day_info_lines = []
+        for d in range(total_days):
+            day_date = request.start_date + timedelta(days=d)
+            weekday = WEEKDAY_KR[day_date.weekday()]
+            day_info_lines.append(f"  {d + 1}일차: {day_date} ({weekday}요일)")
+        day_info = "\n".join(day_info_lines)
+
         prompt = f"""당신은 여행 일정 전문가입니다. 아래 조건에 맞는 {total_days}일 여행 일정을 생성해주세요.
 
 ## 여행 정보
 - 지역: {request.region}
 - 기간: {request.start_date} ~ {request.end_date} ({total_days}일)
+- 하루 시작: {start_h} / 종료: {end_h}
+- 일차별 날짜:
+{day_info}
 
 ## 사용자 선호도
 {pref_info}
@@ -320,13 +305,13 @@ class PlannerService:
 5. 사용자 선호도에 맞는 장소를 우선 선택하세요
 6. 각 장소의 reason은 장소 특성과 선택 이유만 작성하세요. "아침", "점심", "저녁", "오전", "오후" 등 시간 표현은 절대 쓰지 마세요 (예: "인기 랜드마크로 방문객 1위", "근처 맛집으로 현지인 추천", "전통 분위기의 차 문화 체험 가능"). is_night=false인 장소는 reason에 "야경", "야간", "밤", "night" 등의 야간 표현을 절대 쓰지 마세요
 7. day_summaries는 "이 날 일정을 왜 이렇게 구성했는지" 이유를 2-3문장으로 작성하세요 (지역 집중, 카테고리 균형, 동선 흐름 등)
-8. **시간대별 배치 규칙**: 오전(09~12시)엔 관광지/자연/박물관 2~3개, 오후(13~18시)엔 쇼핑/체험/관광지 2~3개(카페 선택적), 저녁 식사 후(저녁식사 종료~22:00)엔 야경/야시장/루프탑 포함 1~2개. is_night=true는 "야경명소", "루프탑", "야시장", "불꽃놀이", "일몰명소"처럼 반드시 밤에만 의미 있는 장소에만 사용하세요 - 체험관·박물관·공원·맛집·카페는 is_night=false입니다. is_night=true인 장소는 반드시 20:00 이후에 배치하고 그 날 가장 마지막 order에 하나만 넣으며 stay_duration을 90분 이상으로 설정하세요
+8. **시간대별 배치 규칙**: {start_h} 시작 기준, 오전({start_h}~12:00)엔 관광지/자연/박물관 2~3개, 오후(13:00~18:00)엔 쇼핑/체험/관광지 2~3개(카페 선택적), 저녁 식사 후(저녁식사 종료~{end_h})엔 야경/야시장/루프탑 포함 1~2개. is_night=true는 "야경명소", "루프탑", "야시장", "불꽃놀이", "일몰명소"처럼 반드시 밤에만 의미 있는 장소에만 사용하세요 - 체험관·박물관·공원·맛집·카페는 is_night=false입니다. is_night=true인 장소는 반드시 20:00 이후에 배치하고 그 날 가장 마지막 order에 하나만 넣으며 stay_duration을 90분 이상으로 설정하세요
 9. **식사 시간 규칙 (필수)**: 맛집/식당은 하루에 반드시 정확히 2개(점심 1개 + 저녁 1개)를 배치하세요.
    - 점심: 11:30~14:00 사이에 이전 일정의 체류 시간을 고려하여 유동적으로 배치 (예: 체험 장소 체류가 길면 13:30 점심도 허용)
    - 저녁: 17:30~20:00 사이에 이전 일정의 체류 시간을 고려하여 유동적으로 배치 (예: 오후 관광 후 18:30 또는 19:30도 허용)
    - 이 외 시간대에는 맛집/식당을 배치하지 마세요
    - 점심 전/후, 저녁 전 빈 시간에는 관광지·체험·쇼핑으로 채우고, 카페는 선택적으로 1개 정도만 넣으세요
-   - 저녁 식사 이후에도 반드시 야경 또는 야간 명소 1개를 추가하여 일정이 22:00까지 이어지도록 하세요
+   - 저녁 식사 이후에도 반드시 야경 또는 야간 명소 1개를 추가하여 일정이 {end_h}까지 이어지도록 하세요
    - 자연/공원 장소는 하루 최대 2개로 제한하세요
 10. 같은 place_id를 여러 날에 중복 사용하지 마세요. 각 장소는 전체 일정에서 한 번만 등장해야 합니다
 {user_req_section}
@@ -354,7 +339,13 @@ class PlannerService:
   }}
 }}"""
 
-        def _call_gpt():
+        # 일수에 비례한 토큰 수 (5일 이상 일정에서 응답 잘림 방지)
+        dynamic_max_tokens = min(total_days * 1200 + 1000, 8192)
+
+        place_dict = {c['place_id']: c for c in candidates}
+        current_prompt = prompt
+
+        def _call_gpt(p: str):
             return self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -362,23 +353,38 @@ class PlannerService:
                         "role": "system",
                         "content": "여행 일정 전문가입니다. JSON 형식으로만 응답합니다."
                     },
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": p}
                 ],
-                max_tokens=GPT_PLANNER_MAX_TOKENS,
+                max_tokens=dynamic_max_tokens,
                 temperature=0.7
             )
 
         last_error = None
         for attempt in range(3):
-            response = await asyncio.to_thread(_call_gpt)
+            response = await asyncio.to_thread(_call_gpt, current_prompt)
             result_text = response.choices[0].message.content
             try:
-                return self._parse_gpt_response(result_text)
+                draft = self._parse_gpt_response(result_text)
             except ValueError as e:
                 last_error = e
                 logger.warning(f"GPT 응답 파싱 실패 (시도 {attempt + 1}/3): {e}")
+                continue
 
-        raise ValueError(f"GPT 응답을 3회 시도 후에도 파싱할 수 없습니다: {last_error}")
+            violations = self._validate_draft(draft, place_dict, total_days)
+            if not violations:
+                return draft
+
+            # 위반 사항을 프롬프트에 추가해서 재시도
+            violation_text = "\n".join(f"- {v}" for v in violations)
+            current_prompt = (
+                prompt +
+                f"\n\n## ❌ 이전 응답 위반 사항 (반드시 수정)\n{violation_text}\n"
+                "위 위반 사항을 모두 해결해서 다시 JSON을 생성해주세요."
+            )
+            logger.warning(f"GPT 응답 제약 위반 (시도 {attempt + 1}/3): {violations}")
+            last_error = ValueError(f"제약 위반: {violations}")
+
+        raise ValueError(f"GPT 응답을 3회 시도 후에도 유효한 일정을 생성할 수 없습니다: {last_error}")
 
     @staticmethod
     def _extract_district(address: str) -> str:
@@ -448,9 +454,9 @@ class PlannerService:
 
         if preference.travel_pace:
             pace_desc = {
-                "relaxed": "여유로운 여행 (장소당 충분한 시간)",
-                "moderate": "보통 페이스",
-                "packed": "빡빡한 일정 (많은 장소 방문)"
+                "relaxed": "여유로운 여행 (장소당 충분한 시간) → 하루 4~5개 장소 권장",
+                "moderate": "보통 페이스 → 하루 5~6개 장소 권장",
+                "packed": "빡빡한 일정 (많은 장소 방문) → 하루 7~8개 장소 권장"
             }
             lines.append(f"- 여행 스타일: {pace_desc.get(preference.travel_pace, preference.travel_pace)}")
 
@@ -458,7 +464,6 @@ class PlannerService:
 
     def _parse_gpt_response(self, text: str) -> dict:
         """GPT 응답 파싱"""
-        # 코드 블록 제거
         text = text.strip()
         if text.startswith("```"):
             text = re.sub(r'^```(?:json)?\n?', '', text)
@@ -467,11 +472,36 @@ class PlannerService:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # JSON 부분만 추출 시도
             match = re.search(r'\{[\s\S]*\}', text)
             if match:
                 return json.loads(match.group())
             raise ValueError("GPT 응답을 파싱할 수 없습니다")
+
+    def _validate_draft(self, draft: dict, place_dict: dict, total_days: int) -> list:
+        """GPT 초안 검증 — 위반 메시지 리스트 반환. 비어있으면 통과."""
+        violations = []
+        seen_ids = set()
+
+        for day_data in draft.get("days", []):
+            day_num = day_data.get("day_number", "?")
+            places = day_data.get("places", [])
+
+            valid = [p for p in places if isinstance(p.get("place_id"), int) and p["place_id"] in place_dict]
+            meals = [p for p in valid if place_dict[p["place_id"]].get("category") == "맛집"]
+
+            if len(valid) < 3:
+                violations.append(f"{day_num}일차: 유효 장소 {len(valid)}개 (후보 목록에 있는 place_id로 최소 3개 필요)")
+            if len(meals) < 2:
+                violations.append(f"{day_num}일차: 식당 {len(meals)}개 (점심 1개 + 저녁 1개 = 정확히 2개 필요)")
+
+            for p in valid:
+                pid = p["place_id"]
+                if pid in seen_ids:
+                    name = place_dict[pid].get("name", pid)
+                    violations.append(f"{day_num}일차: place_id={pid}({name}) 중복 — 각 장소는 전체 일정에서 1번만 사용")
+                seen_ids.add(pid)
+
+        return violations
 
     def _build_places_by_day(
         self,
@@ -612,7 +642,7 @@ class PlannerService:
         ]
 
         def dist(lat1, lng1, lat2, lng2) -> float:
-            return math.sqrt((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2)
+            return self.route_optimizer._haversine(lat1, lng1, lat2, lng2)
 
         for day_num, places in places_by_day.items():
             # 비식당 장소들의 평균 좌표 (centroid)
@@ -644,7 +674,7 @@ class PlannerService:
                         continue
                     alt_dist = dist(alt['latitude'], alt['longitude'], c_lat, c_lng)
                     # 절대 거리도 2km 이상 개선되어야 함 (위경도 0.02 ≈ 2.2km)
-                    if alt_dist < best_dist and (cur_dist - alt_dist) >= 0.02:
+                    if alt_dist < best_dist and (cur_dist - alt_dist) >= 2.0:
                         best_dist = alt_dist
                         best_alt = alt
 
