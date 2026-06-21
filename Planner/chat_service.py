@@ -1863,7 +1863,7 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         Returns: 사용자에게 보여줄 메시지 리스트 (제외된 장소 포함)
         """
         from datetime import time as time_type
-        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import delete as sa_delete, select as sa_select
         from core.models import Itinerary as ItineraryModel
         from Trip.dto import ItineraryUpdate
         from services.kakao_service import get_route_info
@@ -1994,6 +1994,37 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 sa_delete(ItineraryModel).where(ItineraryModel.id.in_(to_delete_ids))
             )
             await db.commit()
+
+        # ── order_index를 arrival_time 순서에 맞게 재정렬 ──────────────────
+        # _recalculate_day_times는 arrival_time만 업데이트하므로
+        # 식사/야경 스냅으로 순서가 바뀐 경우 order_index가 틀어질 수 있음
+        kept_pairs = []  # (arrival_minutes, it_id)
+        for i, it_id in enumerate(it_ids):
+            if it_id not in to_delete_ids:
+                # 업데이트된 arrival_time을 미리 수집한 arrival_minutes로 근사
+                kept_pairs.append((it_id,))
+        # arrival_time 기준 재정렬이 필요한 경우를 위해 DB 재조회
+        if kept_pairs and ordered_itineraries:
+            # trip_id, day_number를 첫 번째 itinerary에서 추출
+            first_it = ordered_itineraries[0]
+            trip_id_val  = getattr(first_it, 'trip_id', None)
+            day_num_val  = getattr(first_it, 'day_number', None)
+            if trip_id_val and day_num_val:
+                result_ord = await db.execute(
+                    sa_select(ItineraryModel.id, ItineraryModel.arrival_time)
+                    .where(
+                        ItineraryModel.trip_id == trip_id_val,
+                        ItineraryModel.day_number == day_num_val
+                    )
+                    .order_by(ItineraryModel.arrival_time.nullsfirst(), ItineraryModel.id)
+                )
+                sorted_ids = [row[0] for row in result_ord.fetchall()]
+                for new_idx, sid in enumerate(sorted_ids, start=1):
+                    await trip_crud.update_itinerary(
+                        db, sid, ItineraryUpdate(order_index=new_idx)
+                    )
+                if sorted_ids:
+                    await db.commit()
 
         return messages
 
