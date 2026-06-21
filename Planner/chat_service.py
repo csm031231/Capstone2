@@ -1899,6 +1899,13 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 )
             )
 
+        meal_sequence = [None] * len(categories)
+        meal_counter = 0
+        for i, cat in enumerate(categories):
+            if cat in MEAL_CATS:
+                meal_counter += 1
+                meal_sequence[i] = meal_counter
+
         LUNCH_S = LUNCH_START.hour * 60 + LUNCH_START.minute
         LUNCH_E = LUNCH_END.hour * 60 + LUNCH_END.minute
         EARLY_D = EARLY_DINNER_START.hour * 60 + EARLY_DINNER_START.minute
@@ -1936,10 +1943,19 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 
             # 식사 시간대 보정
             if categories[i] in MEAL_CATS:
-                if arrival_minutes < LUNCH_S:
-                    arrival_minutes = LUNCH_S
-                elif LUNCH_E <= arrival_minutes < EARLY_D:
-                    arrival_minutes = EARLY_D
+                if meal_sequence[i] == 1:
+                    if arrival_minutes < LUNCH_S:
+                        arrival_minutes = LUNCH_S
+                    # 첫 번째 식사가 점심 구간을 벗어나면 늦은 점심으로 둡니다.
+                elif meal_sequence[i] == 2:
+                    if arrival_minutes < EARLY_D:
+                        arrival_minutes = EARLY_D
+                    # 두 번째 식사는 저녁 구간으로만 이동합니다.
+                else:
+                    if arrival_minutes < LUNCH_S:
+                        arrival_minutes = LUNCH_S
+                    elif LUNCH_E <= arrival_minutes < EARLY_D:
+                        arrival_minutes = EARLY_D
 
             # 야경 장소: 20:00 이전이면 push
             if is_night_flags[i] and arrival_minutes < NIGHT_M:

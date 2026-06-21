@@ -114,13 +114,19 @@ class TimeConstraintService:
         if not night_places and len(afternoon) >= 2:
             night_places = [afternoon.pop()]
 
-        return {
+        segmented_places = {
             'morning':   others[:split],
             'lunch':     [lunch] if lunch else [],
             'afternoon': afternoon,
             'dinner':    [dinner] if dinner else [],
             'night':     night_places,
-        }, warnings
+        }
+
+        for segment_name, place_list in segmented_places.items():
+            for p in place_list:
+                p['time_segment'] = segment_name
+
+        return segmented_places, warnings
 
     def structural_split_all(
         self, places_by_day: Dict[int, List[dict]]
@@ -193,27 +199,52 @@ class TimeConstraintService:
                 # 식사 시간대 push + 공백 흡수
                 place_category = place.get('place_category') or place.get('category') or ''
                 if place_category in ('맛집', '식당'):
+                    meal_segment = place.get('time_segment')
                     t = arrival_time.time()
-                    if t < LUNCH_START:
-                        meal_time = datetime.combine(current_date, LUNCH_START)
-                        gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
-                        if gap_minutes > 0 and day_itineraries:
-                            last = day_itineraries[-1]
-                            if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
-                                last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
-                        arrival_time = meal_time
-                        current_time = meal_time
-                    elif LUNCH_END <= t < EARLY_DINNER_START:
-                        # 오후 일정이 일찍 끝난 경우: 17:30까지만 기다림
-                        meal_time = datetime.combine(current_date, EARLY_DINNER_START)
-                        gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
-                        if gap_minutes > 0 and day_itineraries:
-                            last = day_itineraries[-1]
-                            if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
-                                last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
-                        arrival_time = meal_time
-                        current_time = meal_time
-                    # EARLY_DINNER_START(17:30) ~ DINNER_START(18:30): push 없이 도착 시간에 바로 식사
+
+                    if meal_segment == 'lunch':
+                        if t < LUNCH_START:
+                            meal_time = datetime.combine(current_date, LUNCH_START)
+                            gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
+                            if gap_minutes > 0 and day_itineraries:
+                                last = day_itineraries[-1]
+                                if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
+                                    last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
+                            arrival_time = meal_time
+                            current_time = meal_time
+                        # 점심이 14:00 이후로 밀리는 경우에는 그대로 늦은 점심으로 둠
+                    elif meal_segment == 'dinner':
+                        if t < EARLY_DINNER_START:
+                            meal_time = datetime.combine(current_date, EARLY_DINNER_START)
+                            gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
+                            if gap_minutes > 0 and day_itineraries:
+                                last = day_itineraries[-1]
+                                if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
+                                    last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
+                            arrival_time = meal_time
+                            current_time = meal_time
+                        # EARLY_DINNER_START(17:30) ~ DINNER_START(18:30): 도착 시간 그대로 식사
+                    else:
+                        # fallback: 기존 로직 유지
+                        if t < LUNCH_START:
+                            meal_time = datetime.combine(current_date, LUNCH_START)
+                            gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
+                            if gap_minutes > 0 and day_itineraries:
+                                last = day_itineraries[-1]
+                                if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
+                                    last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
+                            arrival_time = meal_time
+                            current_time = meal_time
+                        elif LUNCH_END <= t < EARLY_DINNER_START:
+                            meal_time = datetime.combine(current_date, EARLY_DINNER_START)
+                            gap_minutes = int((meal_time - arrival_time).total_seconds() / 60)
+                            if gap_minutes > 0 and day_itineraries:
+                                last = day_itineraries[-1]
+                                if (last.get('place_category') or last.get('category')) not in ('맛집', '식당'):
+                                    last['suggested_stay_duration'] = last.get('suggested_stay_duration', 60) + gap_minutes
+                            arrival_time = meal_time
+                            current_time = meal_time
+                        # EARLY_DINNER_START(17:30) ~ DINNER_START(18:30): 도착 시간 그대로 식사
 
                 # 야경 NIGHT_START 이전 불가 + 공백 흡수
                 if self._is_night_place(place) and arrival_time.time() < NIGHT_START:
