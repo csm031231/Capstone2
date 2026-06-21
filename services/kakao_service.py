@@ -47,7 +47,9 @@ async def get_route_info(origin_x: float, origin_y: float, dest_x: float, dest_y
                 data = response.json()
                 routes = data.get("routes", [])
                 if routes:
-                    summary = routes[0]["summary"]
+                    summary = routes[0].get("summary")
+                    if not summary:
+                        return {"duration": 0, "distance": 0, "road_path": []}
 
                     # 도로 경로 좌표 추출
                     # vertexes는 [lng, lat, lng, lat, ...] 플랫 배열 형태로 반환됨

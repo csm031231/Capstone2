@@ -298,22 +298,32 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         response_message = result.get("response_message", "요청을 처리했습니다.")
 
         if not result.get("needs_confirmation") and result.get("action_type") != "question":
+            requested_changes = result.get("changes", [])
             changes_made, updated_trip, warnings = await self._apply_changes(
-                db, user_id, trip, result.get("changes", []), available_places
+                db, user_id, trip, requested_changes, available_places
             )
-            # 변경 요청은 했는데 실제로 적용된 게 없으면 사용자에게 알림
-            if result.get("changes") and not changes_made:
-                response_message = "요청하신 장소를 현재 목록에서 찾을 수 없어 변경하지 못했어요. 다른 장소명으로 다시 시도해 주세요."
-            # 교체 실패(중복) 경고 메시지 추가
+
+            if changes_made:
+                # 실제 적용된 내용을 구체적인 문장으로 구성
+                actual_msg = self._build_applied_message(changes_made)
+                if actual_msg:
+                    response_message = actual_msg
+
+                # 일부 요청이 처리되지 않은 경우 안내
+                if requested_changes and len(changes_made) < len(requested_changes):
+                    response_message += "\n(일부 요청은 처리하지 못했습니다. 장소명을 확인해 주세요.)"
+
+            elif requested_changes:
+                # 변경을 요청했지만 아무것도 적용되지 않음
+                response_message = (
+                    "요청하신 변경을 처리하지 못했습니다. "
+                    "장소 이름이 일정에 없거나 조건에 맞는 장소를 찾지 못했어요. "
+                    "다시 한 번 말씀해 주시겠어요?"
+                )
+
+            # _apply_changes 수준 경고 (교체 차단 등) — 최우선
             if warnings:
                 response_message = " ".join(warnings)
-            # 영업시간 충돌 등 add 경고 메시지 후치
-            add_warnings = [
-                c["warning"] for c in (changes_made or [])
-                if isinstance(c, dict) and c.get("warning")
-            ]
-            if add_warnings:
-                response_message += " (⚠️ " + " / ".join(add_warnings) + ")"
 
         # 8. 세션 업데이트 (실제 변경 결과도 함께 저장해서 GPT가 다음 대화에서 참조 가능)
         await self._update_session(
@@ -416,6 +426,102 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         session.messages = messages[-CHAT_STORAGE_LIMIT:]
         flag_modified(session, "messages")
         await db.commit()
+
+    def _build_applied_message(self, changes_made: list) -> str:
+        """실제 적용된 변경 사항을 구체적인 문장으로 변환"""
+        if not changes_made:
+            return ""
+
+        parts = []
+        warn_parts = []
+
+        for c in changes_made:
+            action = c.get("action", "")
+
+            if action == "add":
+                pname = c.get("place_name", "장소")
+                day   = c.get("day_number")
+                t     = c.get("arrival_time", "")
+                if hasattr(t, "strftime"):
+                    t = t.strftime("%H:%M")
+                day_str  = f"{day}일차 " if day else ""
+                time_str = f" ({t})" if t else ""
+                parts.append(f"{day_str}{pname}을(를) 추가했습니다{time_str}")
+
+            elif action == "remove":
+                pname  = c.get("place_name", "장소")
+                filled = c.get("filled_with")
+                if filled:
+                    parts.append(f"{pname}을(를) 삭제하고 {filled}로 채웠습니다")
+                else:
+                    parts.append(f"{pname}을(를) 일정에서 삭제했습니다")
+
+            elif action == "replace":
+                old = c.get("old_place", "기존 장소")
+                new = c.get("new_place", "새 장소")
+                day = c.get("day_number")
+                day_str = f" ({day}일차)" if day else ""
+                parts.append(f"{old}을(를) {new}으로 교체했습니다{day_str}")
+
+            elif action == "modify":
+                pname   = c.get("place_name", "장소")
+                details = []
+                t = c.get("arrival_time")
+                if t:
+                    if hasattr(t, "strftime"):
+                        t = t.strftime("%H:%M")
+                    details.append(f"방문 시간 → {t}")
+                if c.get("stay_duration"):
+                    details.append(f"체류 시간 → {c['stay_duration']}분")
+                if c.get("memo") is not None:
+                    details.append("메모 수정")
+                parts.append(f"{pname}: {', '.join(details)}" if details else f"{pname} 수정 완료")
+
+            elif action == "reorder":
+                pname     = c.get("place_name", "장소")
+                day       = c.get("day_number", "?")
+                new_order = c.get("new_order")
+                if new_order:
+                    parts.append(f"{day}일차 {pname}을(를) {new_order}번째 순서로 이동했습니다")
+                else:
+                    parts.append(f"{day}일차 동선 순서를 조정했습니다")
+
+            elif action == "optimize_route":
+                parts.append("전체 동선을 최적화했습니다")
+
+            elif action == "swap_places":
+                a = c.get("place_a", "장소A")
+                b = c.get("place_b", "장소B")
+                parts.append(f"{a}와(과) {b}의 순서를 바꿨습니다")
+
+            elif action == "swap_days":
+                da = c.get("day_a", "?")
+                db = c.get("day_b", "?")
+                parts.append(f"{da}일차와 {db}일차 일정을 통째로 교환했습니다")
+
+            elif action == "bulk_modify":
+                scope = f"{c['day_number']}일차 " if c.get("day_number") else "전체 "
+                details = []
+                delta = c.get("stay_duration_delta")
+                if delta:
+                    details.append(f"체류시간 {'+' if delta > 0 else ''}{delta}분")
+                shift = c.get("start_time_shift")
+                if shift:
+                    details.append(f"시작시간 {'+' if shift > 0 else ''}{shift}분")
+                if c.get("stay_duration"):
+                    details.append(f"체류시간 → {c['stay_duration']}분")
+                parts.append(f"{scope}일정 조정: {', '.join(details)}" if details else f"{scope}일정을 조정했습니다")
+
+            elif action == "regenerate":
+                parts.append(f"{c.get('scope', '일정')}을(를) 새로 생성했습니다")
+
+            if c.get("warning"):
+                warn_parts.append(c["warning"])
+
+        result = " / ".join(parts)
+        if warn_parts:
+            result += "\n⚠️ " + " / ".join(warn_parts)
+        return result
 
     def _format_itineraries(self, itineraries: List[Itinerary]) -> str:
         """일정 포맷팅"""
@@ -1102,6 +1208,21 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 if p.id not in existing_ids and p.category and cat in p.category:
                     place = p
                     break
+            # available_places에 없으면 DB에서 직접 조회 (카테고리 전용 폴백)
+            if not place:
+                from sqlalchemy import nulls_last
+                from core.models import Place as PlaceModel
+                search_region = REGION_PREFIX.get(trip.region, trip.region) if trip.region else None
+                q = select(PlaceModel).where(PlaceModel.category == cat)
+                if search_region:
+                    q = q.where(PlaceModel.address.contains(search_region))
+                q = q.where(~PlaceModel.id.in_(existing_ids))
+                q = q.order_by(nulls_last(PlaceModel.readcount.desc())).limit(10)
+                result = await db.execute(q)
+                for p in result.scalars().all():
+                    if p.id not in existing_ids:
+                        place = p
+                        break
 
         # 태그 기반 검색 (카테고리로도 못 찾은 경우)
         # GPT가 "야경", "포토스팟", "힐링" 등 속성 기반으로 요청할 때 사용
@@ -1214,7 +1335,23 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         if hours_warn:
             warnings.append(hours_warn)
 
-        result_info = {"action": "add", "place_name": place.name, "day_number": day}
+        # 추가된 장소의 최종 arrival_time 조회
+        added_arrival = None
+        try:
+            added_it = next(
+                (it for it in fresh_ordered if it.place_id == place.id), None
+            )
+            if added_it and added_it.arrival_time:
+                added_arrival = added_it.arrival_time.strftime("%H:%M")
+        except Exception:
+            pass
+
+        result_info = {
+            "action": "add",
+            "place_name": place.name,
+            "day_number": day,
+            "arrival_time": added_arrival,
+        }
         if warnings:
             result_info["warning"] = " / ".join(warnings)
         return result_info
@@ -1235,6 +1372,8 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
 
         # 커밋 전에 모두 미리 추출 (delete 커밋 후 trip 객체 expire 방지)
         all_used_ids = {it.place_id for it in trip.itineraries if it.id != target.id}
+        # 방금 삭제된 장소는 fill 대상에서도 제외 (삭제 직후 같은 장소가 다시 채워지는 버그 방지)
+        all_used_ids.add(target.place_id)
         trip_id = trip.id
         trip_region = trip.region
 
@@ -1648,16 +1787,18 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         """순서 변경 후 arrival_time을 체인 방식으로 재계산.
 
         초기 생성과 동일한 시간 제약을 적용:
-        - 카카오 API 실제 이동 시간
+        - 카카오 API 실제 이동 시간 (single-pass, 제거된 장소 건너뜀)
         - 페이스 기반 버퍼 (기본 moderate=15분)
         - 식사 시간대 snapping (11:30 전→11:30, 14:00~17:30 사이→17:30)
         - 야경 장소 20:00 이전이면 push
-        - 영업시간 초과 시 경고
-        - 22:00 이후 배치 시 경고
+        - 영업 마감 30분 이내 / 초과 도착 → 일정에서 제외
+        - 23:00 이후 배치(야경 제외) → 일정에서 제외
 
-        Returns: 경고 메시지 리스트
+        Returns: 사용자에게 보여줄 메시지 리스트 (제외된 장소 포함)
         """
         from datetime import time as time_type
+        from sqlalchemy import delete as sa_delete
+        from core.models import Itinerary as ItineraryModel
         from Trip.dto import ItineraryUpdate
         from services.kakao_service import get_route_info
         from Planner.constants import LUNCH_START, LUNCH_END, EARLY_DINNER_START, NIGHT_START
@@ -1667,64 +1808,65 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             return []
 
         tc = get_time_constraint_service()
-        warnings = []
-        LATE_HOUR = 22 * 60  # 22:00 이후면 경고
+        messages = []
+        REMOVE_AFTER = 23 * 60   # 23:00 이후 비야경 장소 제외
 
         MEAL_CATS = {'맛집', '식당'}
         NIGHT_KEYWORDS = {"야경", "야간", "night", "루프탑", "야시장", "불꽃", "일몰", "노을", "선셋"}
         NON_NIGHT_CATS = {'체험', '박물관', '관광지', '맛집', '식당', '카페', '쇼핑', '전시'}
 
         # commit 후 SQLAlchemy expire 방지: 필요한 값 미리 추출
-        it_ids = [it.id for it in ordered_itineraries]
-        stays = [it.stay_duration or 60 for it in ordered_itineraries]
-        places = [getattr(it, 'place', None) for it in ordered_itineraries]
+        it_ids   = [it.id for it in ordered_itineraries]
+        stays    = [it.stay_duration or 60 for it in ordered_itineraries]
+        places   = [getattr(it, 'place', None) for it in ordered_itineraries]
 
-        categories = []
-        is_night_flags = []
+        categories, is_night_flags = [], []
         for place in places:
-            cat = (place.category if place else None) or ""
-            categories.append(cat)
+            cat  = (place.category if place else None) or ""
             tags = (place.tags if place else None) or []
             name = (place.name if place else "") or ""
-            is_night = (
+            categories.append(cat)
+            is_night_flags.append(
                 cat not in NON_NIGHT_CATS and (
                     any(kw in t.lower() for t in tags for kw in NIGHT_KEYWORDS) or
                     any(kw in name for kw in NIGHT_KEYWORDS)
                 )
             )
-            is_night_flags.append(is_night)
 
-        # 카카오 API로 이동 시간 재계산
-        travel_times = [0]
-        for i in range(1, len(ordered_itineraries)):
-            prev_place = places[i - 1]
-            curr_place = places[i]
+        LUNCH_S = LUNCH_START.hour * 60 + LUNCH_START.minute
+        LUNCH_E = LUNCH_END.hour * 60 + LUNCH_END.minute
+        EARLY_D = EARLY_DINNER_START.hour * 60 + EARLY_DINNER_START.minute
+        NIGHT_M = NIGHT_START.hour * 60 + NIGHT_START.minute
 
-            travel_time = 15
-            if (prev_place and curr_place
-                    and prev_place.latitude and prev_place.longitude
-                    and curr_place.latitude and curr_place.longitude):
-                try:
-                    route_info = await get_route_info(
-                        prev_place.longitude, prev_place.latitude,
-                        curr_place.longitude, curr_place.latitude
-                    )
-                    duration = route_info.get('duration', 0)
-                    if duration > 0:
-                        travel_time = max(int(duration / 60), 5)
-                except Exception:
-                    travel_time = getattr(ordered_itineraries[i - 1], 'travel_time_from_prev', None) or 15
-            travel_times.append(travel_time)
-
-        LUNCH_S = LUNCH_START.hour * 60 + LUNCH_START.minute        # 690 (11:30)
-        LUNCH_E = LUNCH_END.hour * 60 + LUNCH_END.minute            # 840 (14:00)
-        EARLY_D = EARLY_DINNER_START.hour * 60 + EARLY_DINNER_START.minute  # 1050 (17:30)
-        NIGHT_M = NIGHT_START.hour * 60 + NIGHT_START.minute        # 1200 (20:00)
-
-        current_minutes = start_hour * 60 + start_minute
+        # ── single-pass: 이전 유효 장소 기준으로 이동 시간 계산 ──────────────
+        prev_valid_place   = None
+        prev_valid_minutes = start_hour * 60 + start_minute  # 마지막 유효 장소 출발 후 시각
+        to_delete_ids      = []
+        is_first_kept      = True  # DB에 저장한 첫 번째 장소 여부
 
         for i, it_id in enumerate(it_ids):
-            arrival_minutes = current_minutes + travel_times[i]
+            place = places[i]
+            pname = (place.name if place else None) or "장소"
+
+            # 이전 유효 장소 → 현재 장소 이동 시간 계산
+            if prev_valid_place is None:
+                travel = 0
+            else:
+                travel = 15
+                if (prev_valid_place.latitude and prev_valid_place.longitude
+                        and place and place.latitude and place.longitude):
+                    try:
+                        route_info = await get_route_info(
+                            prev_valid_place.longitude, prev_valid_place.latitude,
+                            place.longitude, place.latitude
+                        )
+                        duration = route_info.get('duration', 0)
+                        if duration > 0:
+                            travel = max(int(duration / 60), 5)
+                    except Exception:
+                        pass
+
+            arrival_minutes = prev_valid_minutes + travel
 
             # 식사 시간대 보정
             if categories[i] in MEAL_CATS:
@@ -1737,42 +1879,57 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
             if is_night_flags[i] and arrival_minutes < NIGHT_M:
                 arrival_minutes = NIGHT_M
 
-            h, m = divmod(arrival_minutes, 60)
-            if h >= 24:
-                h, m = 23, 59
-            new_arrival = time_type(h, m)
+            # ── 제외 판단 ──────────────────────────────────────────────────
+            should_remove = False
+            remove_reason = ""
 
-            # 영업시간 초과 체크
-            place = places[i]
-            pname = (place.name if place else None) or "장소"
+            # 1) 영업시간 마감 30분 이내 또는 초과
             if place and getattr(place, 'operating_hours', None):
                 try:
                     _, closes = tc._parse_operating_hours(place.operating_hours)
                     if closes:
                         close_min = closes.hour * 60 + closes.minute
-                        if arrival_minutes > close_min:
-                            warnings.append(
-                                f"{pname} 영업 마감({closes.strftime('%H:%M')})보다 늦게 도착 예정({h:02d}:{m:02d})"
-                            )
+                        if arrival_minutes >= close_min - 30:
+                            should_remove = True
+                            remove_reason = f"영업 마감({closes.strftime('%H:%M')}) 시간에 방문 불가"
                 except Exception:
                     pass
 
-            # 22:00 이후 경고 (야경 장소 제외)
-            if arrival_minutes >= LATE_HOUR and not is_night_flags[i]:
-                warnings.append(f"{pname} 도착이 {h:02d}:{m:02d}으로 너무 늦습니다. 일정이 빡빡합니다")
+            # 2) 23:00 이후 비야경 장소
+            if not should_remove and arrival_minutes >= REMOVE_AFTER and not is_night_flags[i]:
+                h, m = divmod(arrival_minutes, 60)
+                should_remove = True
+                remove_reason = f"너무 늦은 시간({h:02d}:{m:02d})에 배치됨"
 
-            update_fields = {"arrival_time": new_arrival}
-            if i > 0:
-                update_fields["travel_time_from_prev"] = travel_times[i]
+            if should_remove:
+                to_delete_ids.append(it_id)
+                messages.append(f"{pname}: {remove_reason}으로 일정에서 제외했습니다")
+                # 시간 체인에서 이 장소의 체류는 제외 (prev_valid_* 유지)
+                continue
 
-            await trip_crud.update_itinerary(
-                db, it_id,
-                ItineraryUpdate(**update_fields)
+            # ── DB 저장 ────────────────────────────────────────────────────
+            h, m = divmod(arrival_minutes, 60)
+            if h >= 24:
+                h, m = 23, 59
+
+            update_fields = {"arrival_time": time_type(h, m)}
+            if not is_first_kept:
+                update_fields["travel_time_from_prev"] = travel
+
+            await trip_crud.update_itinerary(db, it_id, ItineraryUpdate(**update_fields))
+
+            prev_valid_place   = place
+            prev_valid_minutes = arrival_minutes + stays[i] + pace_buffer
+            is_first_kept      = False
+
+        # 제외 장소 삭제
+        if to_delete_ids:
+            await db.execute(
+                sa_delete(ItineraryModel).where(ItineraryModel.id.in_(to_delete_ids))
             )
+            await db.commit()
 
-            current_minutes = arrival_minutes + stays[i] + pace_buffer
-
-        return warnings
+        return messages
 
     async def _apply_modify(self, db, trip, change) -> Optional[dict]:
         """시간/메모 수정"""
