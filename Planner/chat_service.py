@@ -1927,6 +1927,9 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         EARLY_D = EARLY_DINNER_START.hour * 60 + EARLY_DINNER_START.minute
         NIGHT_M = NIGHT_START.hour * 60 + NIGHT_START.minute
 
+        late_start = (start_hour * 60 + start_minute) >= 12 * 60
+        LATE_DAY_CUTOFF = 21 * 60
+
         # ── single-pass: 이전 유효 장소 기준으로 이동 시간 계산 ──────────────
         prev_valid_place   = None
         prev_valid_minutes = start_hour * 60 + start_minute  # 마지막 유효 장소 출발 후 시각
@@ -1993,7 +1996,13 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 except Exception:
                     pass
 
-            # 2) 23:00 이후 비야경 장소
+            # 2) 시작 시간이 늦고, 비야경/비식사 장소라면 21:00 이후부터 자동 축소 시도
+            if not should_remove and late_start and arrival_minutes >= LATE_DAY_CUTOFF:
+                if not is_night_flags[i] and categories[i] not in MEAL_CATS:
+                    should_remove = True
+                    remove_reason = f"늦은 시작으로 일정이 빡빡해져 자동 조정되었습니다"
+
+            # 3) 23:00 이후 비야경 장소
             if not should_remove and arrival_minutes >= REMOVE_AFTER and not is_night_flags[i]:
                 h, m = divmod(arrival_minutes, 60)
                 should_remove = True
