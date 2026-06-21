@@ -439,7 +439,19 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         messages.append({"role": "user", "content": user_message})
 
         if changes_made:
-            result_summary = _json.dumps(changes_made, ensure_ascii=False)
+            try:
+                # 변경내역에 datetime/time 객체 등이 섞여 있을 수 있으므로
+                # 안전한 직렬화를 위해 default=str를 사용합니다.
+                result_summary = _json.dumps(changes_made, ensure_ascii=False, default=str)
+            except Exception:
+                # 최후 방어: 직렬화 실패 시 간단한 텍스트로 대체
+                try:
+                    result_summary = _json.dumps([{
+                        k: (v.strftime('%H:%M') if hasattr(v, 'strftime') else str(v))
+                        for k, v in (c.items() if isinstance(c, dict) else {})
+                    } for c in changes_made], ensure_ascii=False)
+                except Exception:
+                    result_summary = "[변경내역 직렬화 실패]"
             full_response = f"{assistant_response}\n[변경결과: {result_summary}]"
         else:
             full_response = assistant_response
