@@ -195,6 +195,22 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         self.client = OpenAI(api_key=config.openai_api_key)
         self.model = config.openai_model
 
+    def _parse_time_value(self, val):
+        """문자열 'HH:MM'을 time 객체로 변환하거나 이미 time이면 그대로 반환."""
+        if val is None:
+            return None
+        # 지역 import로 충돌 방지
+        from datetime import datetime as _dt
+        from datetime import time as _time
+        if isinstance(val, _time):
+            return val
+        if isinstance(val, str):
+            try:
+                return _dt.strptime(val, "%H:%M").time()
+            except Exception:
+                return None
+        return None
+
     async def process_message(
         self,
         db: AsyncSession,
@@ -2065,7 +2081,13 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
         if change.get("memo") is not None:
             update_data["memo"] = change["memo"]
         if change.get("arrival_time") is not None:
-            update_data["arrival_time"] = change["arrival_time"]
+            # 허용: 문자열 'HH:MM' 또는 time 객체
+            parsed = self._parse_time_value(change["arrival_time"])
+            if parsed is not None:
+                update_data["arrival_time"] = parsed
+            else:
+                # 파싱 실패하면 원시값 유지하지 않고 무시
+                update_data["arrival_time"] = None
 
         if update_data:
             await trip_crud.update_itinerary(
@@ -2593,6 +2615,10 @@ action_type은 가장 대표적인 액션 하나를 쓰되, "compound"를 써도
                 if not day_its:
                     continue
                 first_time = day_its[0].arrival_time
+                # arrival_time이 문자열로 저장된 경우 대비
+                if isinstance(first_time, str):
+                    parsed_ft = self._parse_time_value(first_time)
+                    first_time = parsed_ft
                 base_min = (first_time.hour * 60 + first_time.minute) if first_time else 9 * 60
                 new_min = max(0, min(base_min + time_shift, 23 * 60))
                 new_h, new_m = divmod(new_min, 60)
